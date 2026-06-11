@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# 
+*.ckpt
+*.bin
+*.json
+*.vst3
+Serum2_presets/
+feature_cache/
+models/
+renders/
+serum-preset-packager/
+tb_logs/
