@@ -100,34 +100,6 @@ register_dill_for_windows()
 
 
 # ==============================================================================
-# COLLATE FUNCTION (Module-level for Windows multiprocessing compatibility)
-# ==============================================================================
-def v3_collate_fn(batch: List[Tuple[torch.Tensor, Tuple[float, int]]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Collate function for LPF dataset batches.
-    Concatenates features and extracts labels in a single pass.
-    
-    Combines individual samples into batch tensors:
-    - Stacks features into a single tensor
-    - Stacks normalized frequencies into a tensor
-    - Stacks filter type indices into a tensor
-    
-    Args:
-        batch: List of tuples (features, (frequency, filter_type))
-        
-    Returns:
-        Tuple of (features, frequencies, filter_types)
-    """
-    # Extract and stack features
-    features = torch.stack([sample[0].float() for sample in batch])
-    # Extract and stack frequencies
-    frequencies = torch.stack([torch.tensor(sample[1][0]).float() for sample in batch])
-    # Extract and stack filter types
-    filter_types = torch.stack([torch.tensor(sample[1][1]).long() for sample in batch])
-    return features, frequencies, filter_types
-    
-    
-# ==============================================================================
 # Originally this was inside various classes, but that causes issues:
 # https://discuss.pytorch.org/t/w-cudaipctypes-cpp-22-producer-process-has-been-terminated-before-all-shared-cuda-tensors-released-see-note-sharing-cuda-tensors/124445/14
 # ==============================================================================
@@ -135,10 +107,10 @@ def v4_collate_fn(batch: List[Tuple[torch.Tensor, Tuple[float, int]]]) -> Tuple[
     """
     Custom collate function for efficient batch construction.
     Concatenates features and extracts labels in a single pass.
-    
+
     Args:
         batch: List of (features, (frequency, filter_type)) tuples
-        
+
     Returns:
         Tuple of (features_tensor, frequencies_tensor, filter_types_tensor)
     """
@@ -162,13 +134,13 @@ class CachedFeature:
         - lpf_frequency: Normalized LPF frequency (0-1)
         - filter_type: Encoded filter type index
         - audio_hash: MD5 of audio file for validation
-    
+
     Size estimation per sample:
         - mel_spectrogram: 128 × 93 × 4 bytes ≈ 48 KB
         - lpf_frequency: 4 bytes
         - filter_type: 4 bytes
         - audio_hash: 32 bytes
-        Total: ~50 KB per sample
+        Total: ~50 KB per sample (actually more like 53 kB)
         
     For 100,000 samples: ~5 GB (manageable in RAM)
     
@@ -190,14 +162,14 @@ class FeatureCache:
     
     Storage Hierarchy:
     ┌─────────────────────────────────────────────────────────────┐
-    │ Level 1: VRAM (GPU)        ← Fastest, limited capacity     │
+    │ Level 1: VRAM (GPU)        ← Fastest, limited capacity      │
     │   └── Current batch being trained                           │
     │                                                             │
-    │ Level 2: RAM (System)      ← Large cache, fast access      │
-    │   └── Precomputed features (configurable size)             │
+    │ Level 2: RAM (System)      ← Large cache, fast access       │
+    │   └── Precomputed features (configurable size)              │
     │                                                             │
-    │ Level 3: SSD (Persistent)  ← Largest capacity, slower      │
-    │   └── Full dataset cache on disk                           │
+    │ Level 3: SSD (Persistent)  ← Largest capacity, slower       │
+    │   └── Full dataset cache on disk                            │
     └─────────────────────────────────────────────────────────────┘
     
     Usage Pattern:
@@ -210,11 +182,17 @@ class FeatureCache:
         ram_cache_size: Maximum number of samples in RAM cache
         preload_to_vram: Whether to preload all features to VRAM
         device: PyTorch device for tensor operations
+        stats: Total cache hits and misses, SSD and RAM and VRAM hits
     """
     def __init__(
         self,
         cache_dir: str = "./feature_cache",
-        ram_cache_size: int = 4096,  # Samples to keep in RAM: 8 GB VRAM / 11.5 used when 10_000 ram_cache_size = 0.69, so keep it under 6900
+        # Number of features to keep in RAM. Each feature is a .pkl file of ~53 kB.
+        # 65536  * 53 kB =  3.473 GB
+        # 131072 * 53 kB =  6.946 GB
+        # 163840 * 53 kB =  8.683 GB
+        # 196608 * 53 kB = 10.420 GB
+        ram_cache_size: int = 65536,
         preload_to_vram: bool = False,
         device: Optional[torch.device] = None
     ):
@@ -248,7 +226,8 @@ class FeatureCache:
             'cache_hits': 0,
             'cache_misses': 0,
             'compute_count': 0,
-            'disk_reads': 0,
+            'raw_data_reads': 0,
+            'pkl_feature_reads': 0,
             'ram_hits': 0,
             'vram_hits': 0
         }
@@ -305,9 +284,14 @@ class FeatureCache:
         audio_hash = self.get_sample_hash(wav_path)
         cache_key = wav_path.stem
         
-        # Check if cached feature exists with matching hash
+        # Try to get feature from RAM cache
+        if cache_key in self.feature_cache.ram_cache
+            self.stats['ram_hits'] += 1
+            return self.feature_cache.ram_cache[cache_key]
+
+        # Try to get feature from SSD cache
         cache_file = self.feature_dir / f"{cache_key}.pkl"
-        
+
         if cache_file.exists():
             with open(cache_file, 'rb') as f:
                 cached = pickle.load(f)
@@ -316,13 +300,21 @@ class FeatureCache:
                 # Feature is valid, add to RAM cache
                 self._add_to_ram_cache(cache_key, cached)
                 self.stats['cache_hits'] += 1
-                self.stats['ram_hits'] += 1
+                self.stats['pkl_feature_reads'] += 1
                 return cached
+            else:
+                print(f"DEBUG: Hash check failed for {cache_file}. A new CachedFeature will be created from the raw dataset .WAV and .JSON files.")
+        else:
+            print(f"DEBUG: FeatureCache.cache_file.exists() failed to find {cache_file}. A new CachedFeature will be created from the raw dataset .WAV and .JSON files.")
         
         # Compute features (not cached or hash mismatch)
         self.stats['compute_count'] += 1
         self.stats['cache_misses'] += 1
+        self.stats['raw_data_reads'] += 1
         
+        print(self.stats)
+        print(self.get_ram_cache_stats())
+
         # Load audio
         audio_data, sample_rate = sf.read(str(wav_path), dtype='float32')
         # Convert to mono if stereo
@@ -532,13 +524,14 @@ class CachedLPFDataset(Dataset):
         json_path = wav_path.with_stem(f"{wav_path.stem}_params").with_suffix('.json')
         
         # Check VRAM cache first (fastest)
-        if idx in self.feature_cache.vram_cache:
-            features = self.feature_cache.vram_cache[idx]
-            # Recompute labels since they're small
-            config = json.load(open(json_path))
-            lpf_frequency = self._extract_lpf_frequency(config)
-            filter_type = self._extract_filter_type(config)
-            return features, (lpf_frequency, filter_type)
+        if len(self.feature_cache.vram_cache) > 0:
+            if idx in self.feature_cache.vram_cache:
+                features = self.feature_cache.vram_cache[idx]
+                # Recompute labels since they're small
+                config = json.load(open(json_path))
+                lpf_frequency = self._extract_lpf_frequency(config)
+                filter_type = self._extract_filter_type(config)
+                return features, (lpf_frequency, filter_type)
         
         # Get from feature cache
         cached = self.feature_cache.get_or_compute_feature(wav_path, json_path)
@@ -635,7 +628,12 @@ class OptimizedLPFDataModule(LightningDataModule):
         n_fft: int = 2048,
         hop_length: int = 512,
         cache_dir: str = "./feature_cache",
-        ram_cache_size: int = 4096,
+        # Number of features to keep in RAM. Each feature is a .pkl file of ~53 kB.
+        # 65536  * 53 kB =  3.473 GB
+        # 131072 * 53 kB =  6.946 GB
+        # 163840 * 53 kB =  8.683 GB
+        # 196608 * 53 kB = 10.420 GB
+        ram_cache_size: int = 65536,
         prefetch_factor: int = 128,  # Increased from 32
         pin_memory: bool = False,    # Disable because data already pre-cached to VRAM
         persistent_workers: bool = True,
@@ -655,7 +653,7 @@ class OptimizedLPFDataModule(LightningDataModule):
             n_fft: FFT window size
             hop_length: Hop length for STFT
             cache_dir: Directory for feature cache (default: "./feature_cache")
-            ram_cache_size: Number of samples to keep in RAM cache (default: 4096)
+            ram_cache_size: Number of samples to keep in RAM cache (default: 65536)
             prefetch_factor: Number of batches to prefetch per worker (default: 128)
             pin_memory: Enable pinned memory for faster transfers (default: True)
             persistent_workers: Keep workers alive between epochs (default: True)
@@ -774,402 +772,6 @@ class OptimizedLPFDataModule(LightningDataModule):
             'vram_cache': len(self.feature_cache.vram_cache),
             'disk_cache': len(list(self.feature_cache.feature_dir.glob('*.pkl')))
         }
-
-
-# =============================================================================
-# ORIGINAL DATASET (for backward compatibility)
-# =============================================================================
-class LPFDataset(Dataset):
-    """
-    Dataset for loading and preprocessing audio samples with LPF frequency and filter type.
-    
-    Expected format:
-        - .WAV files: 1-second C3 notes at 48kHz, 32-bit float
-        - .JSON files: Contains filter frequency configuration
-    
-    Output format:
-        - frequency: normalized LPF frequency in [0, 1]
-        - filter_type: encoded filter type class index
-    
-    The dataset handles:
-        - Audio loading via soundfile (preserves 32-bit float)
-        - Mel spectrogram computation
-        - Normalization for training stability
-        
-    Target Normalization:
-        LPF frequencies are normalized to [0, 1] range using:
-            normalized = (frequency - MIN_FREQ) / (MAX_FREQ - MIN_FREQ)
-        where MIN_FREQ = 8 Hz and MAX_FREQ = 22050 Hz
-        
-    This helps the model learn more effectively across the wide dynamic
-    range of filter frequencies.
-    
-    Attributes:
-        wav_paths: List of paths to .WAV files
-        n_mels: Number of Mel frequency bins
-        n_fft: FFT window size
-        hop_length: Hop length for STFT
-        fmin: Minimum frequency for Mel spectrogram
-        fmax: Maximum frequency for Mel spectrogram
-    """
-    
-    # Class-level constants for target normalization
-    TARGET_MIN: float = 8.0      # Minimum reasonable LPF frequency (Hz)
-    TARGET_MAX: float = 22050.0   # Maximum reasonable LPF frequency (Hz)
-    TARGET_RANGE: float = TARGET_MAX - TARGET_MIN
-    
-    #serum2.filter_1_type.valid_values
-    FILTER_TYPES = [
-        'MG Low 6', 'MG Low 12', 'MG Low 18', 'MG Low 24',
-        'Low 6', 'Low 12', 'Low 18', 'Low 24',
-        'High 6', 'High 12', 'High 18', 'High 24',
-        'Band 12', 'Band 24',
-        'Peak 12', 'Peak 24',
-        'Notch 12', 'Notch 24',
-        'LH 6', 'LH 12', 'LB 12', 'LP 12', 'LN 12',
-        'HB 12', 'HP 12', 'HN 12',
-        'BP 12', 'BN 12', 'PP 12', 'PN 12', 'NN 12',
-        'L/B/H 12', 'L/B/H 24', 'L/P/H 12', 'L/P/H 24', 'L/N/H 12', 'L/N/H 24', 'B/P/N 12', 'B/P/N 24',
-        'Cmb +', 'Cmb -', 'Cmb L6+', 'Cmb L6-', 'Cmb H6+', 'Cmb H6-', 'Cmb HL6+', 'Cmb HL6-',
-        'Flg +', 'Flg -', 'Flg L6+', 'Flg L6-', 'Flg H6+', 'Flg H6-', 'Flg HL6+', 'Flg HL6-',
-        'Phs 12+', 'Phs 12-', 'Phs 24+', 'Phs 24-', 'Phs 36+', 'Phs 36-', 'Phs 48+', 'Phs 48-',
-        'Phs 48L6+', 'Phs 48L6-', 'Phs 48H6+', 'Phs 48H6-', 'Phs 48HL6+', 'Phs 48HL6-',
-        'FPhs 12HL6+', 'FPhs 12HL6-',
-        'Low EQ 6', 'Low EQ 12', 'Band EQ 12', 'High EQ 6', 'High EQ 12',
-        'Ring Mod', 'Ring Modx2', 'SampHold', 'SampHold-', 'Combs', 'Allpasses', 'Reverb',
-        'French LP', 'German LP', 'Add Bass',
-        'Formant-I', 'Formant-II', 'Formant-III',
-        'Bandreject', 'Dist.Comb 1 LP', 'Dist.Comb 1 BP', 'Dist.Comb 2 LP', 'Dist.Comb 2 BP',
-        'Scream LP', 'Scream BP', 'Wsp', 'DJ Mixer', 'Diffusor',
-        'MG Ladder', 'Acid Ladder', 'EMS Ladder', 'MG Dirty',
-        'PZ SVF', 'Comb 2', 'Exp MM', 'Exp BPF', 'K35'
-    ]
-    
-    # Create mappings
-    FILTER_TO_INDEX = {ft: idx for idx, ft in enumerate(FILTER_TYPES)}
-    INDEX_TO_FILTER = {idx: ft for idx, ft in enumerate(FILTER_TYPES)}
-    NUM_CLASSES = len(FILTER_TYPES)
-    
-    def __init__(
-        self,
-        wav_paths: List[Path],
-        n_mels: int = 128,
-        n_fft: int = 2048,
-        hop_length: int = 512,
-        fmin: float = 8.0,
-        fmax: float = 24000.0
-    ):
-        """
-        Initialize the dataset.
-        
-        Args:
-            wav_paths: List of paths to .WAV files
-            n_mels: Number of Mel frequency bins (default: 128)
-            n_fft: FFT window size (default: 2048)
-            hop_length: Hop length for STFT (default: 512)
-            fmin: Minimum frequency for Mel spectrogram (default: 20 Hz)
-            fmax: Maximum frequency for Mel spectrogram (default: 24 kHz)
-        """
-        self.wav_paths = wav_paths
-        self.n_mels = n_mels
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        self.fmin = fmin
-        self.fmax = fmax
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-    def __len__(self) -> int:
-        return len(self.wav_paths)
-    
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Tuple[float, int]]:
-        """
-        Get a single sample with frequency and filter type.
-        
-        Returns:
-            Tuple of (features_tensor, (frequency_normalized, filter_type_index))
-            where lpf_frequency is normalized to [0, 1] range
-        """
-        wav_path = self.wav_paths[idx]
-        json_path = wav_path.with_stem(f"{wav_path.stem}_params").with_suffix('.json')
-        
-        # Load audio at native sample rate (48kHz) using float32
-        audio_data, sample_rate = sf.read(str(wav_path), dtype='float32')
-        
-        # Handle stereo: convert to mono by averaging channels
-        if len(audio_data.shape) > 1:
-            # Stereo audio - average channels to get mono
-            audio_data = np.mean(audio_data, axis=1)
-        
-        # Normalize to [-1, 1] range
-        max_val = np.max(np.abs(audio_data))
-        if max_val > 0:
-            audio_data = audio_data / max_val
-        
-        # Compute Mel spectrogram using librosa
-        mel_spectrogram = librosa.feature.melspectrogram(
-            y=audio_data,
-            sr=sample_rate,
-            n_mels=self.n_mels,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            fmin=self.fmin,
-            fmax=self.fmax
-        )
-        
-        # Convert to log scale (dB) for better dynamic range
-        mel_db = librosa.power_to_db(mel_spectrogram, ref=np.max)
-        
-        # Normalize to [0, 1] range per frequency band
-        normalized = self._normalize_mel(mel_db)
-        
-        # Convert to torch tensor with shape (channels, height, width)
-        features_tensor = torch.FloatTensor(normalized).unsqueeze(0)
-        
-        # Load JSON configuration and extract LPF frequency
-        config = json.load(open(json_path))
-        lpf_frequency_normalized = self._extract_lpf_frequency(config)
-        filter_type_index = self._extract_filter_type(config)
-        
-        return features_tensor, (lpf_frequency_normalized, filter_type_index)
-    
-    def _normalize_mel(self, mel_spectrogram: np.ndarray) -> np.ndarray:
-        """
-        Normalize Mel spectrogram values.
-        
-        Standardizes to zero mean and unit variance per frequency band,
-        then clips and rescales to [0, 1] range.
-        
-        Args:
-            mel_spectrogram: 2D numpy array of Mel spectrogram values
-            
-        Returns:
-            Normalized Mel spectrogram with values in [0, 1]
-        """
-        # Per-band normalization
-        mean = np.mean(mel_spectrogram, axis=1, keepdims=True)
-        std = np.std(mel_spectrogram, axis=1, keepdims=True) + 1e-8
-        normalized = (mel_spectrogram - mean) / std
-        # Clip to reasonable range and rescale
-        normalized = np.clip(normalized, -50, 50)
-        normalized = (normalized - normalized.min()) / (normalized.max() - normalized.min() + 1e-8)    
-        return normalized
-    
-    def _extract_lpf_frequency(self, config: dict) -> float:
-        """
-        Extract LPF frequency from configuration dictionary and normalize.
-        
-        Serum 2 JSON structure uses "filter_1_freq_hz" for the low-pass 
-        filter cutoff frequency in Hertz. This is the parameter we want to predict.
-        
-        The frequency is normalized to [0, 1] range using:
-            normalized = (frequency - TARGET_MIN) / (TARGET_MAX - TARGET_MIN)
-            
-        where TARGET_MIN = 8 Hz and TARGET_MAX = 22050 Hz
-        
-        Example JSON structure:
-            {
-                "filter_1_level": "0.0 dB",
-                "filter_1_on": true,
-                "filter_1_type": "Band 12",
-                "filter_1_freq_hz": 307.0,  <- This is the target value
-                "filter_1_res": 31.0,
-                ...
-            }
-        
-        Args:
-            config: Configuration dictionary from .JSON file
-            
-        Returns:
-            Normalized LPF frequency in [0, 1] range as a float
-        """
-        # Serum 2 uses "filter_1_freq_hz" for the filter cutoff frequency
-        freq_hz = float(config["filter_1_freq_hz"])
-        # Clamp to valid range
-        freq_clamped = np.clip(freq_hz, self.TARGET_MIN, self.TARGET_MAX)
-        # Normalize to [0, 1]
-        normalized = (freq_clamped - self.TARGET_MIN) / self.TARGET_RANGE
-        return float(normalized)
- 
-    def _extract_filter_type(self, config: dict) -> int:
-        """
-        Extract filter type and return encoded index.
-        
-        Serum 2 uses various filter type strings. We map these to indices.
-        
-        Common formats in Serum 2:
-            - "MG Low 12" (Multisource Gradient)
-            - "LP 12" (Low Pass)
-            - "HP 12" (High Pass)
-            - "BP 12" (Band Pass)
-            - "BS 12" (Band Stop/Notch)
-            - "APF 12" (All Pass)
-            - "PK 12" (Peak/Parametric)
-            - "Comb 12" (Comb Filter)
-            - "Resonator" / "Formant"
-            - "Waveshaper", "Bitcrusher", etc.
-        
-        Args:
-            config: Configuration dictionary from .JSON file
-            
-        Returns:
-            Integer index representing the filter type
-        """
-        filter_type_str = config.get("filter_1_type", "Unknown")
-        # Handle cases where filter type might be None or empty
-        if not filter_type_str or filter_type_str == "None":
-            filter_type_str = "Unknown"
-        # Map to index, use 0 (Unknown) if not found
-        return self.FILTER_TO_INDEX.get(filter_type_str, 0)
- 
-    def unnormalize_frequency(self, normalized: float) -> float:
-        """
-        Convert normalized frequency back to Hz.
-        
-        Args:
-            normalized: Normalized frequency in [0, 1] range
-            
-        Returns:
-            Frequency in Hz
-        """
-        return normalized * self.TARGET_RANGE + self.TARGET_MIN
-    
-    @staticmethod
-    def compute_statistics(data_dir: str) -> Dict[str, Any]:
-        """
-        Compute dataset statistics for reporting.
-        
-        Analyzes all JSON files in the data directory and computes
-        statistics about the LPF frequency distribution.
-        
-        Args:
-            data_dir: Path to directory containing .JSON files
-            
-        Returns:
-            Dictionary with frequency distribution, counts, etc.
-        """
-        json_files = sorted(Path(data_dir).rglob("*.json"))
-        frequencies = []
-        filter_types = defaultdict(int)
-        filter_counts = 0
-        
-        for jf in json_files:
-            try:
-                with open(jf) as f:
-                    config = json.load(f)
-                freq = float(config["filter_1_freq_hz"])
-                frequencies.append(freq)
-                # Track filter types if available
-                if "filter_1_type" in config:
-                    filter_types[config["filter_1_type"]] += 1
-                filter_counts += 1
-            except Exception as e:
-                print(f"Warning: Could not process {jf.name}: {e}")
-        
-        return {
-            'total_samples': len(json_files),
-            'min_frequency': min(frequencies) if frequencies else 0,
-            'max_frequency': max(frequencies) if frequencies else 0,
-            'mean_frequency': np.mean(frequencies) if frequencies else 0,
-            'std_frequency': np.std(frequencies) if frequencies else 0,
-            'median_frequency': np.median(frequencies) if frequencies else 0,
-            'frequency_range': f"{min(frequencies)} - {max(frequencies)} Hz" if frequencies else "N/A",
-            'filter_types': dict(filter_types),
-            'num_filter_types': len(filter_types),
-            'files_processed': filter_counts
-        }
-    
-
-# =============================================================================
-# ORIGINAL DATA MODULE (for backward compatibility)
-# =============================================================================
-class LPFDataModule(LightningDataModule):
-    """
-    PyTorch Lightning DataModule managing the LPF dataset.
-    
-    Handles data splitting, batching, and DataLoader creation.
-    """
-    def __init__(
-        self,
-        data_dir: str,
-        batch_size: int = 128,
-        num_workers: int = 1,
-        validation_split: float = 0.1,
-        n_mels: int = 128,
-        n_fft: int = 2048,
-        hop_length: int = 512,
-        prefetch_factor: int = 128
-    ):
-        super().__init__()
-        self.data_dir = Path(data_dir)
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.validation_split = validation_split
-        self.n_mels = n_mels
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        self.prefetch_factor = prefetch_factor
-        
-        self.train_dataset: Optional[LPFDataset] = None
-        self.val_dataset: Optional[LPFDataset] = None
-        self.wav_files: List[Path] = []
-        
-    def setup(self, stage: Optional[str] = None) -> None:
-        """Initialize datasets before training."""
-        # Discover all .WAV files
-        self.wav_files = sorted(list(self.data_dir.rglob("*.wav")))
-        
-        if not self.wav_files:
-            raise ValueError(f"No .wav files found in {self.data_dir}")
-        
-        print(f"Found {len(self.wav_files)} audio files")
-        
-        # Create full dataset
-        full_dataset = LPFDataset(
-            wav_paths=self.wav_files,
-            n_mels=self.n_mels,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length
-        )
-        
-        # Split into train/validation sets
-        val_size = int(len(full_dataset) * self.validation_split)
-        train_size = len(full_dataset) - val_size
-        
-        print(f"Split: {train_size} training, {val_size} validation")
-        print(f"Number of filter types: {LPFDataset.NUM_CLASSES}")
-        
-        self.train_dataset, self.val_dataset = torch.utils.data.random_split(
-            full_dataset,
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(667)
-        )
-    
-    def train_dataloader(self) -> DataLoader:
-        """Training dataloader with CUDA support."""
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=False, # Disable because data already pre-cached to VRAM
-            persistent_workers=True,
-            prefetch_factor=self.prefetch_factor,  # Prefetch batches
-            collate_fn=lpf_collate_fn,  # Use module-level function
-            multiprocessing_context='spawn'  # Better for Windows
-        )
-    
-    def val_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=False, # Disable because data already pre-cached to VRAM
-            persistent_workers=True,
-            prefetch_factor=self.prefetch_factor,  # Prefetch batches
-            collate_fn=lpf_collate_fn,  # Use module-level function
-            multiprocessing_context='spawn'  # Better for Windows
-        )
 
 
 # =============================================================================
@@ -1508,7 +1110,12 @@ class LPFPredictor:
         batch_size: int = 128,
         prefetch_factor: int = 128,
         num_workers: int = 1,
-        ram_cache_size: int = 4096,
+        # Number of features to keep in RAM. Each feature is a .pkl file of ~53 kB.
+        # 65536  * 53 kB =  3.473 GB
+        # 131072 * 53 kB =  6.946 GB
+        # 163840 * 53 kB =  8.683 GB
+        # 196608 * 53 kB = 10.420 GB
+        ram_cache_size: int = 65536,
         learning_rate: float = 0.0005,
         validation_split: float = 0.1,
         output_dir: str = "./models",
@@ -2010,8 +1617,8 @@ Examples:
                        help='Integer number of samples to pre-fetch per dataloader worker (default: 128)')
     parser.add_argument('--num-workers', type=int, default=1,
                        help='Integer number of workers for data loading (default: 1)')
-    parser.add_argument('--ram-cache-size', type=int, default=4096,
-                        help='Number of samples to pre-load into RAM cache (default: 4096)')
+    parser.add_argument('--ram-cache-size', type=int, default=65536,
+                        help='Number of samples to pre-load into RAM cache (default: 65536)')
     parser.add_argument('--learning-rate', type=float, default=0.0005,
                        help='Learning rate (default: 0.0005)')
     parser.add_argument('--output-dir', type=str, default='./models',
