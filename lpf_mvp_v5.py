@@ -285,9 +285,9 @@ class FeatureCache:
         cache_key = wav_path.stem
         
         # Try to get feature from RAM cache
-        if cache_key in self.feature_cache.ram_cache
+        if cache_key in self.ram_cache:
             self.stats['ram_hits'] += 1
-            return self.feature_cache.ram_cache[cache_key]
+            return self.ram_cache[cache_key]
 
         # Try to get feature from SSD cache
         cache_file = self.feature_dir / f"{cache_key}.pkl"
@@ -361,7 +361,7 @@ class FeatureCache:
         cached = CachedFeature(
             mel_spectrogram=normalized.astype(np.float32),  # 4 bytes per value
             lpf_frequency=float(lpf_frequency),
-            filter_type=LPFDataset.FILTER_TO_INDEX.get(filter_type_str, 0),
+            filter_type=CachedLPFDataset.FILTER_TO_INDEX.get(filter_type_str, 0),
             audio_hash=audio_hash
         )
         # Save to disk cache
@@ -465,6 +465,38 @@ class CachedLPFDataset(Dataset):
     - Subsequent runs: ~10-30 sec (cache load)
     - Training speed: 2-3x faster than original
     """
+    #serum2.filter_1_type.valid_values
+    FILTER_TYPES = [
+        'MG Low 6', 'MG Low 12', 'MG Low 18', 'MG Low 24',
+        'Low 6', 'Low 12', 'Low 18', 'Low 24',
+        'High 6', 'High 12', 'High 18', 'High 24',
+        'Band 12', 'Band 24',
+        'Peak 12', 'Peak 24',
+        'Notch 12', 'Notch 24',
+        'LH 6', 'LH 12', 'LB 12', 'LP 12', 'LN 12',
+        'HB 12', 'HP 12', 'HN 12',
+        'BP 12', 'BN 12', 'PP 12', 'PN 12', 'NN 12',
+        'L/B/H 12', 'L/B/H 24', 'L/P/H 12', 'L/P/H 24', 'L/N/H 12', 'L/N/H 24', 'B/P/N 12', 'B/P/N 24',
+        'Cmb +', 'Cmb -', 'Cmb L6+', 'Cmb L6-', 'Cmb H6+', 'Cmb H6-', 'Cmb HL6+', 'Cmb HL6-',
+        'Flg +', 'Flg -', 'Flg L6+', 'Flg L6-', 'Flg H6+', 'Flg H6-', 'Flg HL6+', 'Flg HL6-',
+        'Phs 12+', 'Phs 12-', 'Phs 24+', 'Phs 24-', 'Phs 36+', 'Phs 36-', 'Phs 48+', 'Phs 48-',
+        'Phs 48L6+', 'Phs 48L6-', 'Phs 48H6+', 'Phs 48H6-', 'Phs 48HL6+', 'Phs 48HL6-',
+        'FPhs 12HL6+', 'FPhs 12HL6-',
+        'Low EQ 6', 'Low EQ 12', 'Band EQ 12', 'High EQ 6', 'High EQ 12',
+        'Ring Mod', 'Ring Modx2', 'SampHold', 'SampHold-', 'Combs', 'Allpasses', 'Reverb',
+        'French LP', 'German LP', 'Add Bass',
+        'Formant-I', 'Formant-II', 'Formant-III',
+        'Bandreject', 'Dist.Comb 1 LP', 'Dist.Comb 1 BP', 'Dist.Comb 2 LP', 'Dist.Comb 2 BP',
+        'Scream LP', 'Scream BP', 'Wsp', 'DJ Mixer', 'Diffusor',
+        'MG Ladder', 'Acid Ladder', 'EMS Ladder', 'MG Dirty',
+        'PZ SVF', 'Comb 2', 'Exp MM', 'Exp BPF', 'K35'
+    ]
+
+    # Create mappings
+    FILTER_TO_INDEX = {ft: idx for idx, ft in enumerate(FILTER_TYPES)}
+    INDEX_TO_FILTER = {idx: ft for idx, ft in enumerate(FILTER_TYPES)}
+    NUM_CLASSES = len(FILTER_TYPES)
+
     def __init__(
         self,
         wav_paths: List[Path],
@@ -582,7 +614,7 @@ class CachedLPFDataset(Dataset):
         filter_type_str = config.get("filter_1_type", "Unknown")
         if not filter_type_str or filter_type_str == "None":
             filter_type_str = "Unknown"
-        return LPFDataset.FILTER_TO_INDEX.get(filter_type_str, 0)
+        return CachedLPFDataset.FILTER_TO_INDEX.get(filter_type_str, 0)
 
 
 # =============================================================================
@@ -802,7 +834,7 @@ class LPFMultiOutput(LightningModule):
         self,
         input_channels: int = 1,
         n_mels: int = 128,
-        num_classes: int = LPFDataset.NUM_CLASSES,
+        num_classes: int = CachedLPFDataset.NUM_CLASSES,
         learning_rate: float = 0.0005,
         freq_loss_weight: float = 1.0,
         type_loss_weight: float = 0.5
@@ -1094,7 +1126,7 @@ class LPFPredictor:
         self.n_mels = 128
         self.n_fft = 2048
         self.hop_length = 512
-        self.num_classes = LPFDataset.NUM_CLASSES
+        self.num_classes = CachedLPFDataset.NUM_CLASSES
         
         # Model instance
         self.model: Optional[LPFMultiOutput] = None
@@ -1122,7 +1154,6 @@ class LPFPredictor:
         n_mels: int = 128,
         freq_loss_weight: float = 1.0,
         type_loss_weight: float = 0.5,
-        use_optimized: bool = True  # Use OptimizedLPFDataModule if True
     ) -> None:
         """
         Train the multi-output prediction model.
@@ -1135,37 +1166,23 @@ class LPFPredictor:
             validation_split: Fraction for validation set
             output_dir: Directory to save checkpoints
             n_mels: Number of Mel frequency bins
-            use_optimized: If True, uses OptimizedLPFDataModule with caching
         """
-        if use_optimized:
-            # Use optimized datamodule with caching
-            print(f"DEBUG: predictor.train() is creating datamodule = OptimizedLPFDataModule() with ram_cache_size = {ram_cache_size}")
-            datamodule = OptimizedLPFDataModule(
-                data_dir=data_dir,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                validation_split=validation_split,
-                n_mels=n_mels,
-                n_fft=self.n_fft,
-                hop_length=self.hop_length,
-                prefetch_factor=prefetch_factor,
-                cache_dir="./feature_cache",
-                ram_cache_size=ram_cache_size,
-                preload_to_vram=False,
-                augment=False
-            )
-        else:
-            # Use original datamodule for backward compatibility
-            datamodule = LPFDataModule(
-                data_dir=data_dir,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                validation_split=validation_split,
-                n_mels=n_mels,
-                n_fft=self.n_fft,
-                hop_length=self.hop_length,
-                prefetch_factor=prefetch_factor
-            )
+        # Use optimized datamodule with caching
+        print(f"DEBUG: predictor.train() is creating datamodule = OptimizedLPFDataModule() with ram_cache_size = {ram_cache_size}")
+        datamodule = OptimizedLPFDataModule(
+            data_dir=data_dir,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            validation_split=validation_split,
+            n_mels=n_mels,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            prefetch_factor=prefetch_factor,
+            cache_dir="./feature_cache",
+            ram_cache_size=ram_cache_size,
+            preload_to_vram=False,
+            augment=False
+        )
         
         # Setup callbacks with timestamped names
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1212,7 +1229,6 @@ class LPFPredictor:
         print(f"Filter types: {self.num_classes}")
         print(f"Batch size: {batch_size}")
         print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
-        print(f"Optimized mode (pre-transform dataset and load into system RAM (maybe also into VRAM)): {use_optimized}")
         print("-" * 60)
         
         # Setup model
@@ -1317,7 +1333,7 @@ class LPFPredictor:
         print(f"Input file: {wav_path}")
         print(f"Freq pred (normalized): {frequency:.4f}")
         print(f"Freq pred (Hz): {frequency * 22042 + 8:.2f}")
-        print(f"Filter type: {LPFDataset.FILTER_TYPES[filter_type]}")
+        print(f"Filter type: {CachedLPFDataset.FILTER_TYPES[filter_type]}")
         print(f"Model freq_head sigmoid output range: [{freq_pred.min():.4f}, {freq_pred.max():.4f}]")
         print(f"------------------------\n")
         
@@ -1350,7 +1366,7 @@ class LPFPredictor:
         
         if self.model is None:
             n_mels = checkpoint.get('n_mels', 128)
-            num_classes = checkpoint.get('num_classes', LPFDataset.NUM_CLASSES)
+            num_classes = checkpoint.get('num_classes', CachedLPFDataset.NUM_CLASSES)
             self.model = LPFMultiOutput(
                 input_channels=1,
                 n_mels=n_mels,
@@ -1669,7 +1685,6 @@ def main():
             n_mels=args.n_mels,
             freq_loss_weight=args.freq_loss_weight,
             type_loss_weight=args.type_loss_weight,
-            use_optimized=True  # Use optimized datamodule by default
         )
         save_path = os.path.join(args.output_dir, f"final_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pt")
         predictor.save_model(save_path)
@@ -1683,7 +1698,7 @@ def main():
         # Convert to Hz for display
         freq_hz = frequency * 22042 + 8
         print(f"LPF frequency in Hz: {freq_hz:.2f} Hz")
-        print(f"Predicted filter type: {LPFDataset.FILTER_TYPES[filter_type]}")
+        print(f"Predicted filter type: {CachedLPFDataset.FILTER_TYPES[filter_type]}")
     elif args.batch_predict:
         if not args.input_dir or not args.output_csv:
             print("Error: --input-dir and --output-csv required for batch prediction")
@@ -1699,7 +1714,7 @@ def main():
                 'lpf_frequency_normalized': frequency,
                 'lpf_frequency_hz': freq_hz,
                 'filter_type_index': filter_type,
-                'filter_type_name': LPFDataset.FILTER_TYPES[filter_type]
+                'filter_type_name': CachedLPFDataset.FILTER_TYPES[filter_type]
             })
         df = pd.DataFrame(results)
         df.to_csv(args.output_csv, index=False)
