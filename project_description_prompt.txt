@@ -1,0 +1,87 @@
+I want to create an AI/ML model. The model will ingest pairs of .WAV audio files and .JSON config files during training. The model will ingest .WAV audio files during inference. The purpose of the model is predict the synthesizer filter type and frequency parameter values which were used to generate the .WAV file during inference. During training, the model will learn the relationships between the .WAV audio and the filter type and frequency parameter values by reading those two values from the .JSON config file with a name corresponding to the matching .WAV audio file.
+
+For the sake of this MVP experimental development project, all of the .WAV files will be of the same size, and the audio will always be in the same format of 32-bit floating-point 48 kHz stereo, and will always have the same length of 1.1 seconds.
+
+I have at least 300_000 pairs of WAV and JSON files in my "raw" dataset, and that number will probably be much larger in the future.
+
+There are 108 filter type values, which are strings like ['FPhs 12HL6+',
+ 'FPhs 12HL6-',
+ 'Low EQ 6',
+ 'Low EQ 12',
+ 'Band EQ 12',
+ 'Ring Mod',
+ 'Ring Modx2',
+ 'SampHold',
+ 'SampHold-',
+ 'Combs',
+ 'Reverb',
+ 'Formant-I',
+ 'Formant-II',
+ 'Formant-III',
+ 'Bandreject',
+ 'Dist.Comb 1 LP'] and so on.
+
+The filter frequency values can be anything from nearly 0 Hz to 24 Hz. For this initial MVP, I am only using the Serum 2 synthesizer. This synthesizer's filter frequency values are limited to a range of 8 Hz to 22050 Hz.
+
+I believe that this program may benefit from using two separate models:
+* one model to learn and predict frequency values, because these values lie along a continuum
+* a second model to learn and predict filter type values, because these values are a finite set of categories and not a continuum.
+
+I believe that the optimal approach is probably to encode the .WAV files' audio data into Mel spectrograms, and/or to use a multi-resolution short-term Fourier transform; encode the filter frequency values as either their raw values in Hz, or normalize them to a range such as [0, 1]; and to encode the filter type values in whatever way you deem to be optimal. Consider the pros and cons of transforming the raw audio data into multiple representations, such as using both a Mel-Spectrogram representation (to more closely model human perception of the relative loudness of different frequency bands) and a complex spectrogram (to capture stereo imaging and phase information, which may be relevant when using a phasing or flanging filter type); or using both a "stock" complex spectrogram and an "augmented" complex spectrogram based on the results of applying a perceptual weighting algorithm to the original "raw" audio data.
+
+In order to handle stereo .WAV audio data, as well as account for stereo imaging and phase differences created by some filter types, I think that we should use something like `spectrogram_real_L, spectrogram_imag_L, spectrogram_real_R, spectrogram_imag_R`.
+
+The filter type predictions must be very accurate, since these values do not represent a continuum, but totally separate categories.
+
+The filter frequency value predictions do not need to be extremely precise, especially in the highest frequency ranges, as the human ear is unlikely to be able to discern a difference between, e.g., a low-pass filter with a frequency parameter value of 15000 Hz versus 13500 Hz or 16000 HZ. However, the human ear can be more sensitive to the human vocal range, as well as extremely low-frequency differences, so it is important that a filter frequency value of 60 Hz is not approximated by 25 Hz or 180 Hz (though something in the range of about 50 to 75 Hz would probably be acceptable as an approximation to the ground truth of 60 Hz).
+
+I will use the Python programming language for this task. I will be using the latest, or nearly the latest, version of Python 3, such as Python 3.13 or higher.
+I prefer to use the `soundfile` library for importing and exporting WAV audio. Note that because the `Soundfile.read()` method creates numpy arrays with dtype=64 by default, we need to explicitly set the dtype=32 instead: e.g., `audio_data, sample_rate = soundfile.read(str(wav_path), dtype='float32')`
+I prefer the `pytorch-lightning` and `pytorch` libraries instead of, e.g., TensorFlow.
+
+I will be using a computer with at least 6 CPUs, at least 32 GB of system RAM, and a modern CUDA GPU made by Nvidia with at least 8 GB of VRAM.
+
+Each .WAV audio file in the "raw" dataset was created using one of the following 108 filter types:
+```
+['MG Low 6', 'MG Low 12', 'MG Low 18', 'MG Low 24', 'Low 6', 'Low 12', 'Low 18', 'Low 24', 'High 6', 'High 12', 'High 18', 'High 24', 'Band 12', 'Band 24', 'Peak 12', 'Peak 24', 'Notch 12', 'Notch 24', 'LH 6', 'LH 12', 'LB 12', 'LP 12', 'LN 12', 'HB 12', 'HP 12', 'HN 12', 'BP 12', 'BN 12', 'PP 12', 'PN 12', 'NN 12', 'L/B/H 12', 'L/B/H 24', 'L/P/H 12', 'L/P/H 24', 'L/N/H 12', 'L/N/H 24', 'B/P/N 12', 'B/P/N 24', 'Cmb +', 'Cmb -', 'Cmb L6+', 'Cmb L6-', 'Cmb H6+', 'Cmb H6-', 'Cmb HL6+', 'Cmb HL6-', 'Flg +', 'Flg -', 'Flg L6+', 'Flg L6-', 'Flg H6+', 'Flg H6-', 'Flg HL6+', 'Flg HL6-', 'Phs 12+', 'Phs 12-', 'Phs 24+', 'Phs 24-', 'Phs 36+', 'Phs 36-', 'Phs 48+', 'Phs 48-', 'Phs 48L6+', 'Phs 48L6-', 'Phs 48H6+', 'Phs 48H6-', 'Phs 48HL6+', 'Phs 48HL6-', 'FPhs 12HL6+', 'FPhs 12HL6-', 'Low EQ 6', 'Low EQ 12', 'Band EQ 12', 'High EQ 6', 'High EQ 12', 'Ring Mod', 'Ring Modx2', 'SampHold', 'SampHold-', 'Combs', 'Allpasses', 'Reverb', 'French LP', 'German LP', 'Add Bass', 'Formant-I', 'Formant-II', 'Formant-III', 'Bandreject', 'Dist.Comb 1 LP', 'Dist.Comb 1 BP', 'Dist.Comb 2 LP', 'Dist.Comb 2 BP', 'Scream LP', 'Scream BP', 'Wsp', 'DJ Mixer', 'Diffusor', 'MG Ladder', 'Acid Ladder', 'EMS Ladder', 'MG Dirty', 'PZ SVF', 'Comb 2', 'Exp MM', 'Exp BPF', 'K35']
+```
+At least one of these filters is an all-pass filter. It is possible that some of the other filter types have significant phase-dependent and/or phase-altering properties/functionality.
+
+Hierarchical classification makes sense! Some of these filters are the same logical type, such as "MG Low", with different filter curve steepness sub-types, such as "MG Low 6", "MG Low 12", "MG Low 18", and "MG Low 24".
+These are the 5 top-level filter type categories and their corresponding sets of filter types:
+```
+Normal = ['MG Low 6', 'MG Low 12', 'MG Low 18', 'MG Low 24', 'Low 6', 'Low 12', 'Low 18', 'Low 24', 'High 6', 'High 12', 'High 18', 'High 24', 'Band 12', 'Band 24', 'Peak 12', 'Peak 24', 'Notch 12', 'Notch 24']
+ Multi = ['LH 6', 'LH 12', 'LB 12', 'LP 12', 'LN 12', 'HB 12', 'HP 12', 'HN 12', 'BP 12', 'BN 12', 'PP 12', 'PN 12', 'NN 12', 'L/B/H 12', 'L/B/H 24', 'L/P/H 12', 'L/P/H 24', 'L/N/H 12', 'L/N/H 24', 'B/P/N 12', 'B/P/N 24']
+ Flanges = ['Cmb +', 'Cmb -', 'Cmb L6+', 'Cmb L6-', 'Cmb H6+', 'Cmb H6-', 'Cmb HL6+', 'Cmb HL6-', 'Flg +', 'Flg -', 'Flg L6+', 'Flg L6-', 'Flg H6+', 'Flg H6-', 'Flg HL6+', 'Flg HL6-', 'Phs 12+', 'Phs 12-', 'Phs 24+', 'Phs 24-', 'Phs 36+', 'Phs 36-', 'Phs 48+', 'Phs 48-', 'Phs 48L6+', 'Phs 48L6-', 'Phs 48H6+', 'Phs 48H6-', 'Phs 48HL6+', 'Phs 48HL6-', 'FPhs 12HL6+', 'FPhs 12HL6-']
+ Misc = ['Low EQ 6', 'Low EQ 12', 'Band EQ 12', 'High EQ 6', 'High EQ 12', 'Ring Mod', 'Ring Modx2', 'SampHold', 'SampHold-', 'Combs', 'Allpasses', 'Reverb', 'French LP', 'German LP', 'Add Bass', 'Formant-I', 'Formant-II', 'Formant-III', 'Bandreject', 'Dist.Comb 1 LP', 'Dist.Comb 1 BP', 'Dist.Comb 2 LP', 'Dist.Comb 2 BP', 'Scream LP', 'Scream BP']
+ S2_Filters = ['Wsp', 'DJ Mixer', 'Diffusor', 'MG Ladder', 'Acid Ladder', 'EMS Ladder', 'MG Dirty', 'PZ SVF', 'Comb 2', 'Exp MM', 'Exp BPF', 'K35']
+```
+In addition to these 5 categories, there are logical sub-types, such as "MG Low 6", "MG Low 12", "MG Low 18", and "MG Low 24" all being variations of the same filter architecture/design with only a difference in filter curve steepness of 6, 12, 18, or 24 dB per octave, respectively.
+Perhaps we should create a logical hierarchy for filter type classification, along the lines of the following pattern:
+"Normal" --> "MG Low" --> "MG Low 6"
+"Flanges --> " Phs" --> "Phs 24+"
+"Misc" --> "Formant" --> "Formant-III"
+and so on.
+
+Perhaps the model's accuracy, at least in terms of human perception of the quality of the filter frequency value predictions, could be enhanced by applying perceptual weighting, such as penalizing low-frequency inaccuracies more severely while penalizing the highest-frequency inaccuracies less severely. Perhaps we could leverage ITU-R 468 weighting?
+
+What are some viable alternatives, if any, to using a spectrogram in this scenario? I am more concerned with achieving consistently high-quality results than saving time or minimizing computer resource utilization.
+
+I would prefer to optimize for quality and accuracy instead of prioritizing training and inference speed and/or lowering system resource utilization.
+
+Please add class imbalance mitigation: add weight parameter to CrossEntropyLoss based on inverse class frequency.
+
+Low-pass filter types are likely to be used more often than the more unusual and niche filter types, so perhaps using a logarithmic approach to perceptual weighting would make more sense, e.g.: `1/(log(freq+1))`.
+
+Prefer a modern state-of-the-art architecture such as a Transformer-based attention mechanism over a less advanced approach such as a simple CNN.
+
+Please package the entire solution into a single .py script with an `argparse` CLI which exposes arguments for, at a minimum:
+* Number of dataloader workers for the training dataset (default 6)
+* Number of dataloader workers for the validation dataset (default 2)
+* Batch size (default 64)
+* Batch prefetch factor (default 2)
+* Number of epochs (default 100)
+* Learning rate (default 0.0005)
+* Optimizer (default "cawr" for CosineAnnealingWarmRestarts)
+* Raw dataset input folder (default './renders/lpf_mvp')
+* Model output folder (default './models')

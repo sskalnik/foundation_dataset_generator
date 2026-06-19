@@ -217,14 +217,28 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# 
-*.ckpt
+# =============================================================================
+# Ignore files and directories unique to this git repo
+# =============================================================================
+# Pedalboard raw_state plugin binaries
 *.bin
+# model checkpoints
+*.ckpt
+# .JSON plugin parameter config files
 *.json
+# .VSTS3 plugins
 *.vst3
+# .WAV audio files
+*.wav
+# Serum 2 plugin presets (.serumpreset)
 Serum2_presets/
+# Pickled and cached pre-encoded features (.pkl)
 feature_cache/
+# model checkpoints folder
 models/
+# WAV audio file folder
 renders/
+# I checked this out in a subdirectory just for handy reference
 serum-preset-packager/
+# TensorBoard logs
 tb_logs/
