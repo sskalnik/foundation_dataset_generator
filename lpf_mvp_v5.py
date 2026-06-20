@@ -1186,7 +1186,7 @@ class LPFPredictor:
         
         # Setup callbacks with timestamped names
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        checkpoint_path =f"best_{timestamp}" + '_epoch{epoch:04d}_step{step}_val_loss{val_loss:.4g}_val_freq_loss{val_freq_loss:.4g}_val_type_loss{val_type_loss:.4g}'
+        checkpoint_path = f"best_{timestamp}" + '_epoch{epoch:04d}_step{step}_val_loss{val_loss:.4g}_val_freq_loss{val_freq_loss:.4g}_val_type_loss{val_type_loss:.4g}'
         checkpoint_callback = ModelCheckpoint(
             dirpath=output_dir,
             filename=checkpoint_path,
