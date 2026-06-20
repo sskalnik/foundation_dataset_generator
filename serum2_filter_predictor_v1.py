@@ -20,7 +20,6 @@ Trade-off Summary (Memory vs. Compute vs. Quality):
    phase coherence critical for phasing/flanging/combs filter classification.
 3. Log-frequency compression + ERB-weighted MSE loss shifts optimization focus toward low/mid bands
    where human hearing is most sensitive, at the cost of slightly higher absolute error in >12kHz range.
-   This matches your perceptual accuracy requirement.
 """
 
 import argparse
@@ -32,12 +31,13 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 import numpy as np
-# `torchaudio` is practically unusable on Windows), but `soundfile` "just works"
+# `torchaudio` is practically unusable for file I/O on Windows, but `soundfile` "just works"
 # PS: Fuck `torchcodec`, fuck Meta, and fuck you Zuck
 import soundfile as sf 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+# `torchaudio` is better for this than `torch.stft`
 import torchaudio.transforms as transforms
 from pytorch_lightning import LightningDataModule, LightningModule, Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, RichModelSummary, DeviceStatsMonitor, Timer
@@ -402,6 +402,8 @@ class FrequencyPerceptualMSELoss(nn.Module):
         base_mse: torch.Tensor = torch.mean(log_error ** 2)
         
         # Compute perceptual weights from raw Hz targets
+        # https://en.wikipedia.org/wiki/Equivalent_rectangular_bandwidth
+        # https://www.tonestack.net/articles/psychoacoustics-of-sound-reproduction/noise-perception-dynamic-range.html
         erb_scale_values: torch.Tensor = self._hz_to_erb(raw_target_hz)
         perceptual_weights: torch.Tensor = 1.0 / (erb_scale_values + 1e-6)
         
