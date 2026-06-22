@@ -59,7 +59,7 @@ from yyjson import Document
 # Enable cuDNN benchmark for faster convolutions
 torch.backends.cudnn.benchmark = True
 # Set float32 matmul precision for faster training with values other than "highest" if needed
-torch.set_float32_matmul_precision('highest')
+torch.set_float32_matmul_precision('high')
 
 # =============================================================================
 # DILL REGISTRATION FOR WINDOWS COMPATIBILITY
