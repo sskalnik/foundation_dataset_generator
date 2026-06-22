@@ -43,8 +43,9 @@ import torchaudio.transforms as transforms
 # https://github.com/tyleryep/torchinfo
 import torchinfo
 from pytorch_lightning import LightningDataModule, LightningModule, Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint, RichModelSummary, DeviceStatsMonitor, Timer
+from pytorch_lightning.callbacks import ModelCheckpoint, RichModelSummary, DeviceStatsMonitor, Timer, WeightAveraging
 from pytorch_lightning.loggers import TensorBoardLogger
+from torch.optim.swa_utils import get_ema_avg_fn
 from torch.utils.data import DataLoader, Dataset
 # Useful for benchmarking, and less verbose than print() statements in loops
 from tqdm import tqdm
@@ -81,6 +82,16 @@ register_dill_for_windows()
 rich_model_summary = RichModelSummary(max_depth=-1)
 device_stats_monitor = DeviceStatsMonitor(cpu_stats=True)
 time_stats_monitor = Timer(duration=None, verbose=True)
+
+
+class EMAWeightAveraging(WeightAveraging):
+    def __init__(self):
+        super().__init__(avg_fn=get_ema_avg_fn())
+
+    def should_update(self, step_idx=None, epoch_idx=None):
+        # Start after 100 steps.
+        return (step_idx is not None) and (step_idx >= 100)
+
 
 class FilterMetadataSidecarCallback(ModelCheckpoint):
     """
@@ -122,12 +133,14 @@ class FilterMetadataSidecarCallback(ModelCheckpoint):
 
             print(f"[INFO] Saved metadata sidecar: {metadata_path.name}")
 
+
 # ============================================================================
 # CONFIGURATION & DEFAULTS
 # ============================================================================
 DEFAULT_TRAIN_WORKERS: int = 4
 DEFAULT_VAL_WORKERS: int = 4
 DEFAULT_BATCH_SIZE: int = 16
+DEFAULT_ACCUMULATE_GRAD_BATCHES: int = 2  # Maintain effective batch size of 2x for gradient stability
 DEFAULT_PREFETCH_FACTOR: int = 4
 DEFAULT_NUM_EPOCHS: int = 100
 DEFAULT_LEARNING_RATE: float = 0.0005
@@ -672,6 +685,7 @@ class AudioFilterPredictorModule(LightningModule):
             params=self.parameters(),
             lr=self.learning_rate,
             weight_decay=1e-4,  # L2 regularization to prevent overfitting on niche filters
+            foreach=True,
         )
 
         scheduler: torch.optim.lr_scheduler._LRScheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -860,14 +874,6 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
         index_to_filter_type=data_module.train_dataset.dataset.index_to_filter_type,
         num_classes=data_module.train_dataset.dataset.num_classes,
     )
-    #checkpoint_callback: ModelCheckpoint = ModelCheckpoint(
-    #    dirpath=Path(cli_arguments.output_dir) / "checkpoints",
-    #    filename=checkpoint_filename,
-    #    monitor="val_accuracy",#"val_total_loss",
-    #    mode="max",#"min",
-    #    save_top_k=5,
-    #    verbose=True,
-    #)
 
     tensorboard_logger = TensorBoardLogger(
         save_dir=cli_arguments.output_dir,
@@ -877,13 +883,15 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
 
     trainer: Trainer = Trainer(
         max_epochs=cli_arguments.num_epochs,
-        accelerator="auto",   # Automatically uses CUDA if available
-        devices=1,            # Single GPU for MVP; scales to multi-GPU via DDP
+        accelerator="auto",    # Automatically uses CUDA if available
+        devices=1,             # Single GPU for MVP; scales to multi-GPU via DDP
         strategy="auto",
-        callbacks=[checkpoint_callback, rich_model_summary, device_stats_monitor, time_stats_monitor],
+        callbacks=[checkpoint_callback, rich_model_summary, device_stats_monitor, time_stats_monitor, EMAWeightAveraging()],
         logger=tensorboard_logger,
         log_every_n_steps=10,
-        precision="16-mixed", # Mixed precision for speed, which is probably not significantly worse than "32-true" speed.
+        precision="16-mixed",  # Mixed precision for speed, which is probably not significantly worse than "32-true" speed.
+        gradient_clip_val=1.0, # Prevents gradient explosion OOMs during early training instability
+        accumulate_grad_batches=DEFAULT_ACCUMULATE_GRAD_BATCHES,
     )
 
     print(f"[INFO] Starting training with {num_classes} filter classes.")
