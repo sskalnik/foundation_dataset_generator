@@ -43,8 +43,9 @@ import torchaudio.transforms as transforms
 # https://github.com/tyleryep/torchinfo
 import torchinfo
 from pytorch_lightning import LightningDataModule, LightningModule, Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint, RichModelSummary, DeviceStatsMonitor, Timer, WeightAveraging
+from pytorch_lightning.callbacks import ModelCheckpoint, RichModelSummary, RichProgressBar, DeviceStatsMonitor, Timer, WeightAveraging
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.profilers import SimpleProfiler, AdvancedProfiler
 from torch.optim.swa_utils import get_ema_avg_fn
 from torch.utils.data import DataLoader, Dataset
 # Useful for benchmarking, and less verbose than print() statements in loops
@@ -58,7 +59,11 @@ from yyjson import Document
 # =============================================================================
 # Enable cuDNN benchmark for faster convolutions
 torch.backends.cudnn.benchmark = True
-# Set float32 matmul precision for faster training with values other than "highest" if needed
+# Set float32 matmul precision for faster training with values other than "highest" if needed.
+# TF32 provides 10 bits of mantissa vs FP32's 24 bits.
+# For log-frequency regression targets (range ~2.1 to ~9.9), the quantization noise is ~1e-4,
+# which is smaller than typical batch-to-batch label variance.
+# Classification heads are inherently robust to sub-FP32 precision.
 torch.set_float32_matmul_precision('high')
 
 # =============================================================================
@@ -114,9 +119,8 @@ class FilterMetadataSidecarCallback(ModelCheckpoint):
         """Called immediately after a checkpoint is successfully written to disk."""
         # Get the path of the just-saved checkpoint file
         ckpt_path = Path(trainer.checkpoint_callback.last_model_path)
+        print(f"[DEBUG] trainer.checkpoint_callback.last_model_path = {ckpt_path}")
         if ckpt_path != Path(".") and ckpt_path.suffix == ".ckpt":
-            print(f"[DEBUG] trainer.checkpoint_callback.last_model_path = {ckpt_path}")
-
             # Construct sidecar filename with identical stem
             metadata_path = ckpt_path.with_name(f"{ckpt_path.stem}_filter_metadata.json")
             print(f"[DEBUG] metadata_path = {metadata_path}")
@@ -141,7 +145,7 @@ DEFAULT_TRAIN_WORKERS: int = 4
 DEFAULT_VAL_WORKERS: int = 4
 DEFAULT_BATCH_SIZE: int = 16
 DEFAULT_ACCUMULATE_GRAD_BATCHES: int = 2  # Maintain effective batch size of 2x for gradient stability
-DEFAULT_PREFETCH_FACTOR: int = 4
+DEFAULT_PREFETCH_FACTOR: int = 2
 DEFAULT_NUM_EPOCHS: int = 100
 DEFAULT_LEARNING_RATE: float = 0.0005
 # CosineAnnealingWarmRestarts
@@ -848,6 +852,7 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
         optimizer_type=cli_arguments.optimizer,
         class_weights=class_weights,
     )
+    print(f"[DEBUG] Is model on GPU? {model_instance.on_gpu}")
 
     # Create dummy input matching exact training pipeline shape: [batch, 4 channels, freq_bins, time_frames]
     dummy_spectrogram_input = torch.randn(cli_arguments.batch_size, 4, 1025, 413)
@@ -870,6 +875,7 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
         monitor="val_accuracy",#"val_total_loss",
         mode="max",#"min",
         save_top_k=5,
+        save_last=True,
         verbose=True,
         index_to_filter_type=data_module.train_dataset.dataset.index_to_filter_type,
         num_classes=data_module.train_dataset.dataset.num_classes,
@@ -883,15 +889,16 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
 
     trainer: Trainer = Trainer(
         max_epochs=cli_arguments.num_epochs,
-        accelerator="auto",    # Automatically uses CUDA if available
+        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=1,             # Single GPU for MVP; scales to multi-GPU via DDP
         strategy="auto",
-        callbacks=[checkpoint_callback, rich_model_summary, device_stats_monitor, time_stats_monitor, EMAWeightAveraging()],
+        callbacks=[checkpoint_callback, rich_model_summary, device_stats_monitor, time_stats_monitor, EMAWeightAveraging(), RichProgressBar()],
         logger=tensorboard_logger,
         log_every_n_steps=10,
         precision="16-mixed",  # Mixed precision for speed, which is probably not significantly worse than "32-true" speed.
         gradient_clip_val=1.0, # Prevents gradient explosion OOMs during early training instability
         accumulate_grad_batches=DEFAULT_ACCUMULATE_GRAD_BATCHES,
+        profiler="advanced",
     )
 
     print(f"[INFO] Starting training with {num_classes} filter classes.")
