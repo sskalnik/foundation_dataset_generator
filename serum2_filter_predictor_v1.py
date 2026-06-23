@@ -118,7 +118,7 @@ class FilterMetadataSidecarCallback(ModelCheckpoint):
     def on_save_checkpoint(self, trainer: "Trainer", pl_module: "LightningModule", checkpoint: Dict[str, Any]) -> None:
         """Called immediately after a checkpoint is successfully written to disk."""
         # Get the path of the just-saved checkpoint file
-        ckpt_path = Path(trainer.checkpoint_callback.last_model_path)
+        ckpt_path = Path(self.kth_best_model_path)
         print(f"[DEBUG] trainer.checkpoint_callback.last_model_path = {ckpt_path}")
         if ckpt_path != Path(".") and ckpt_path.suffix == ".ckpt":
             # Construct sidecar filename with identical stem
@@ -564,6 +564,8 @@ class AudioFilterPredictorModule(LightningModule):
             weight=self.class_weights,
             reduction="mean"
         )
+
+        print(f"[DEBUG] Within the model's __init__(), is the model on GPU? {self.on_gpu}")
 
     @staticmethod
     def _compute_normalized_combined_loss(

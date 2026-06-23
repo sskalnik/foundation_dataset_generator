@@ -1682,3 +1682,81 @@ for tempo in tqdm(random_tempos, unit='tempo'):
                 file_path = os.path.join('P:', 'renders', '2bars', preset_name, render_filename)
                 with pb.io.AudioFile(file_path, "w", sample_rate, num_channels=num_channels, bit_depth=32) as f:
                     f.write(audio)
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+>>> for filter_1_type in tqdm(serum2.filter_1_type.valid_values, unit='filter_1_type'):
+...     serum2.filter_1_type = filter_1_type
+...     wavetable_path = decrypted_preset_data["Oscillator0"]['WTOsc0']['relativePathToWT']
+...     wavetable_name_stripped = re.search(r'/(.*)\.wav', wavetable_path)[1].replace(' ', '')
+...     for wavetable_position in tqdm([1, 3, 4, 5], unit='wavetable_position'):
+...         serum2.a_wt_pos = float(wavetable_position)
+...         esc_f1type = re.sub(r'[^a-zA-Z0-9+-]', '', serum2.filter_1_type)
+...         for midi_note_number in tqdm(random.sample(range(21,109), k=8), unit='midi_note_number'):
+...             Path(os.path.join(
+...                 os.path.curdir,
+...                 "renders",
+...                 "random",
+...                 "Serum2",
+...                 f"{wavetable_name_stripped}_{serum2.a_wt_pos}",
+...                 f"{number_to_note(midi_note_number)}_{midi_note_number}MIDI",
+...                 f"{esc_f1type}f1type"
+...             )).mkdir(parents=True, exist_ok=True)
+...             midi_sequence = []
+...             midi_sequence.append(Message("note_on", note=midi_note_number, time=0))
+...             midi_sequence.append(Message("note_off", note=midi_note_number, time=note_length_in_seconds))
+...             k = int(0.1 * len(serum2.filter_1_freq_hz.valid_values))
+...             for filter_1_freq_hz in tqdm(random.sample(serum2.filter_1_freq_hz.valid_values, k=k), unit='filter_1_freq_hz'):
+...                 serum2.filter_1_freq_hz = filter_1_freq_hz
+...                 print(f"Generating audio with wavetable {wavetable_path} in position {serum2.a_wt_pos}")
+...                 print(f"at pitch {number_to_note(midi_note_number)} = {midi_note_number} MIDI for {note_length} note at {tempo} BPM in {time_signature}")
+...                 print(f"with filter1type {serum2.filter_1_type} @ {serum2.filter_1_freq_hz} Hz...")
+...                 audio = serum2(midi_messages=midi_sequence, duration=(note_length_in_seconds*1.1), sample_rate=sample_rate, num_channels=num_channels)
+...                 param_value_dict = {parameter_name: getattr(serum2, parameter_name) for parameter_name in serum2.parameters.keys()}
+...                 param_value_dict = {k: (bool(v) if isinstance(v, WrappedBool) else v) for k, v in param_value_dict.items()}
+...                 preset_name = f"Serum2_{wavetable_name_stripped}_{serum2.a_wt_pos}_{number_to_note(midi_note_number)}_{midi_note_number}MIDI_{esc_f1type}f1type_{serum2.filter_1_freq_hz}f1hz"
+...                 render_filename = f"{preset_name}.wav"
+...                 json_file_path = os.path.join(
+...                     os.path.curdir,
+...                     "renders",
+...                     "random",
+...                     "Serum2",
+...                     f"{wavetable_name_stripped}_{serum2.a_wt_pos}",
+...                     f"{number_to_note(midi_note_number)}_{midi_note_number}MIDI",
+...                     f"{esc_f1type}f1type",
+...                     f"{render_filename[0:-4]}_params.json"
+...                 )
+...                 with open(json_file_path, 'w') as file:
+...                     json.dump(param_value_dict, file, indent=4, ensure_ascii=True)
+...                 raw_state_bin_file_path = os.path.join(
+...                     os.path.curdir,
+...                     "renders",
+...                     "random",
+...                     "Serum2",
+...                     f"{wavetable_name_stripped}_{serum2.a_wt_pos}",
+...                     f"{number_to_note(midi_note_number)}_{midi_note_number}MIDI",
+...                     f"{esc_f1type}f1type",
+...                     f"{render_filename[0:-4]}_params.bin"
+...                 )
+...                 with open(raw_state_bin_file_path, 'wb') as file:
+...                     file.write(serum2.raw_state)
+...                 wav_file_path = os.path.join(
+...                     os.path.curdir,
+...                     "renders",
+...                     "random",
+...                     "Serum2",
+...                     f"{wavetable_name_stripped}_{serum2.a_wt_pos}",
+...                     f"{number_to_note(midi_note_number)}_{midi_note_number}MIDI",
+...                     f"{esc_f1type}f1type",
+...                     render_filename
+...                 )
+...                 with pb.io.AudioFile(wav_file_path, "w", sample_rate, num_channels=num_channels, bit_depth=32) as f:
+...                     f.write(audio)
