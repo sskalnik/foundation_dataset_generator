@@ -692,6 +692,8 @@ class AudioFilterPredictorModule(LightningModule):
             lr=self.learning_rate,
             weight_decay=1e-4,  # L2 regularization to prevent overfitting on niche filters
             foreach=True,
+            # https://discuss.pytorch.org/t/nan-loss-issues-with-precision-16-in-pytorch-lightning-gan-training/204369/7
+            eps=1e-6,
         )
 
         scheduler: torch.optim.lr_scheduler._LRScheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -900,7 +902,7 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
         precision="16-mixed",  # Mixed precision for speed, which is probably not significantly worse than "32-true" speed.
         gradient_clip_val=1.0, # Prevents gradient explosion OOMs during early training instability
         accumulate_grad_batches=DEFAULT_ACCUMULATE_GRAD_BATCHES,
-        profiler="advanced",
+        profiler="simple",
     )
 
     print(f"[INFO] Starting training with {num_classes} filter classes.")
