@@ -31,6 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 
+import bitsandbytes as bnb
 import numpy as np
 # `torchaudio` is practically unusable for file I/O on Windows, but `soundfile` "just works"
 # PS: Fuck `torchcodec`, fuck Meta, and fuck you Zuck
@@ -647,10 +648,11 @@ class AudioFilterPredictorModule(LightningModule):
         target distribution. Cyclic/Restarts schedules prevent saddle-point trapping
         in multi-task loss landscapes.
         """
-        optimizer: torch.optim.Optimizer = torch.optim.AdamW(
+        optimizer = bnb.optim.AdamW8bit(#torch.optim.Optimizer = torch.optim.AdamW(
             params=self.parameters(),
             lr=self.learning_rate,
-            weight_decay=1e-4,  # L2 regularization to prevent overfitting on niche filters
+            weight_decay=1e-2,#1e-4,  # L2 regularization to prevent overfitting on niche filters
+            betas=(0.9, 0.995),
             foreach=True,
             # https://discuss.pytorch.org/t/nan-loss-issues-with-precision-16-in-pytorch-lightning-gan-training/204369/7
             eps=1e-6,
