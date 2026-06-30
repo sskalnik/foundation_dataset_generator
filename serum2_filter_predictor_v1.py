@@ -941,8 +941,8 @@ def run_inference_mode(cli_arguments: argparse.Namespace) -> None:
     print("[INFO] Loading filter type label mappings...")
     inference_index_to_filter_type: Dict[int, str] = {}
 
-    # Construct sidecar path using the exact checkpoint filename stem
-    metadata_path = checkpoint_path.with_name(f"{checkpoint_path.stem}_filter_metadata.json")
+    # Construct sidecar path using the exact checkpoint filename stem (datetime prefix only)
+    metadata_path = checkpoint_path.with_name(f"{checkpoint_path.stem[0:16]}_filter_metadata.json")
 
     if metadata_path.exists():
         # Fast path: load from precomputed JSON sidecar
@@ -954,7 +954,7 @@ def run_inference_mode(cli_arguments: argparse.Namespace) -> None:
         print(f"[INFO] Loaded metadata sidecar from {metadata_path.name} ({len(inference_index_to_filter_type)} classes)")
     else:
         # Fallback path: re-parse dataset for backward compatibility with older checkpoints
-        print("[WARN] Metadata sidecar not found. Falling back to dataset parsing...")
+        print(f"[WARN] Metadata sidecar not found at {metadata_path}! Falling back to dataset parsing...")
         # =============================================================================
         # RECOVER CLASS LABEL MAPPINGS FROM DATASET (NOT CHECKPOINT)
         # =============================================================================
