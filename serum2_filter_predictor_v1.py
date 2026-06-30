@@ -66,78 +66,6 @@ torch.backends.cudnn.benchmark = True
 # Classification heads are inherently robust to sub-FP32 precision.
 torch.set_float32_matmul_precision('high')
 
-# =============================================================================
-# DILL REGISTRATION FOR WINDOWS COMPATIBILITY
-# =============================================================================
-def register_dill_for_windows() -> None:
-    """Register dill for Windows-compatible lambda pickling."""
-    try:
-        import dill
-        dill.settings['recurse'] = True
-        print("Dill registered for Windows compatibility")
-    except ImportError:
-        print("Warning: dill not installed. Install with: pip install dill")
-
-
-register_dill_for_windows()
-
-# ============================================================================
-# CALLBACKS
-# ============================================================================
-rich_model_summary = RichModelSummary(max_depth=-1)
-device_stats_monitor = DeviceStatsMonitor(cpu_stats=True)
-time_stats_monitor = Timer(duration=None, verbose=True)
-
-
-class EMAWeightAveraging(WeightAveraging):
-    def __init__(self):
-        super().__init__(avg_fn=get_ema_avg_fn())
-
-    def should_update(self, step_idx=None, epoch_idx=None):
-        # Start after 100 steps.
-        return (step_idx is not None) and (step_idx >= 100)
-
-
-class FilterMetadataSidecarCallback(ModelCheckpoint):
-    """
-    Extends ModelCheckpoint to save a human-readable JSON sidecar alongside every .ckpt file.
-
-    Trade-off Summary (I/O vs Robustness vs Complexity):
-    1. Adds ~5ms disk write per checkpoint, but ensures metadata survives training crashes
-       and eliminates post-training scanning steps.
-    2. Keeps checkpoint and metadata tightly coupled in the same directory, making model
-       versioning and deployment trivial.
-    3. Slightly more code than post-training scan, but removes implicit state dependencies
-       on dataset objects after training completes.
-    """
-    def __init__(self, *args, index_to_filter_type: Dict[int, str], num_classes: int, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.index_to_filter_type = index_to_filter_type
-        self.num_classes = num_classes
-
-    def on_save_checkpoint(self, trainer: "Trainer", pl_module: "LightningModule", checkpoint: Dict[str, Any]) -> None:
-        """Called immediately after a checkpoint is successfully written to disk."""
-        # Get the path of the just-saved checkpoint file
-        ckpt_path = Path(self.kth_best_model_path)
-        print(f"[DEBUG] trainer.checkpoint_callback.last_model_path = {ckpt_path}")
-        if ckpt_path != Path(".") and ckpt_path.suffix == ".ckpt":
-            # Construct sidecar filename with identical stem
-            metadata_path = ckpt_path.with_name(f"{ckpt_path.stem}_filter_metadata.json")
-            print(f"[DEBUG] metadata_path = {metadata_path}")
-
-            metadata_content: Dict[str, Any] = {
-                "index_to_filter_type": self.index_to_filter_type,
-                "num_classes": self.num_classes,
-                "class_counts": dict(trainer.datamodule.full_dataset.class_counts),
-            }
-
-            # Write JSON sidecar synchronously (non-blocking enough for checkpoint I/O)
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata_content, f, indent=2)
-
-            print(f"[INFO] Saved metadata sidecar: {metadata_path.name}")
-
-
 # ============================================================================
 # CONFIGURATION & DEFAULTS
 # ============================================================================
@@ -168,6 +96,38 @@ FREQ_MAX_HZ: float = 22050.0
 
 # Class Imbalance Mitigation
 CLASS_WEIGHT_NORMALIZATION_METHOD: str = "sum_to_one"  # Options: 'sum_to_one', 'sqrt_inverse'
+
+
+# =============================================================================
+# DILL REGISTRATION FOR WINDOWS COMPATIBILITY
+# =============================================================================
+def register_dill_for_windows() -> None:
+    """Register dill for Windows-compatible lambda pickling."""
+    try:
+        import dill
+        dill.settings['recurse'] = True
+        print("Dill registered for Windows compatibility")
+    except ImportError:
+        print("Warning: dill not installed. Install with: pip install dill")
+
+
+register_dill_for_windows()
+
+# ============================================================================
+# CALLBACKS
+# ============================================================================
+rich_model_summary = RichModelSummary(max_depth=-1)
+device_stats_monitor = DeviceStatsMonitor(cpu_stats=True)
+time_stats_monitor = Timer(duration=None, verbose=True)
+
+
+class EMAWeightAveraging(WeightAveraging):
+    def __init__(self):
+        super().__init__(avg_fn=get_ema_avg_fn())
+
+    def should_update(self, step_idx=None, epoch_idx=None):
+        # Start after 100 steps.
+        return (step_idx is not None) and (step_idx >= 100)
 
 
 # ============================================================================
@@ -873,17 +833,27 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     checkpoint_filename = f"{timestamp}_" + "{epoch:04d}_{val_accuracy:.4g}_{val_total_loss:.4g}_{val_cls_loss:.4g}_{val_freq_loss:.4g}"
-    checkpoint_callback = FilterMetadataSidecarCallback(
+    checkpoint_callback = ModelCheckpoint(
         dirpath=Path(cli_arguments.output_dir) / "checkpoints",
         filename=checkpoint_filename,
         monitor="val_accuracy",#"val_total_loss",
         mode="max",#"min",
         save_top_k=5,
-        save_last=True,
+        #save_last=True,
         verbose=True,
-        index_to_filter_type=data_module.train_dataset.dataset.index_to_filter_type,
-        num_classes=data_module.train_dataset.dataset.num_classes,
     )
+
+    # Write JSON sidecar
+    metadata_path = Path(cli_arguments.output_dir) / "checkpoints" / f"{timestamp}_filter_metadata.json"
+    print(f"[DEBUG] metadata_path = {metadata_path}")
+    metadata_content: Dict[str, Any] = {
+        "index_to_filter_type": data_module.train_dataset.dataset.index_to_filter_type,
+        "num_classes": num_classes,
+        "class_counts": dict(data_module.train_dataset.dataset.class_counts),
+    }
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata_content, f, indent=2)
+    print(f"[INFO] Saved metadata sidecar: {metadata_path.name}")
 
     tensorboard_logger = TensorBoardLogger(
         save_dir=cli_arguments.output_dir,
