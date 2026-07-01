@@ -265,7 +265,7 @@ class AudioFilterPredictionDataset(Dataset):
 
         # Apply temporal slicing: use only part of the full audio stream from the .WAV file
         end_sample_index: int = int(self.duration_seconds * self.sample_rate)
-        print(f"[DEBUG] Instead of {len(audio_data_array)}, truncating end time to {end_sample_index} samples ({self.duration_seconds} seconds)")
+        #print(f"[DEBUG] Instead of {len(audio_data_array)}, truncating end time to {end_sample_index} samples ({self.duration_seconds} seconds)")
         # Slice the audio tensor along the time dimension (dim=1)
         sliced_audio_tensor: torch.Tensor = audio_tensor[:, 0:end_sample_index]
 
@@ -889,7 +889,7 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
 
     # Compute exact STFT time frames based on actual audio window duration
     # Formula: ceil((duration_seconds * sample_rate) / hop_length) + 1 (for safety margin in some STFT implementations)
-    expected_time_frames: int = math.ceil((cli_arguments.duration_seconds * cli_arguments.sample_rate) / cli_arguments.hop_length) + 1
+    expected_time_frames: int = math.ceil((cli_arguments.duration_seconds * 48_000) / STFT_HOP_LENGTH) + 1
     # Create dummy input matching exact training pipeline shape: [batch, 4 channels, freq_bins, time_frames]
     # Using dynamic calculation prevents profile mismatches and ensures benchmark accuracy
     dummy_spectrogram_input = torch.randn(
