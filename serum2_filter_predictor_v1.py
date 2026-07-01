@@ -263,6 +263,12 @@ class AudioFilterPredictionDataset(Dataset):
         #print(f"[DEBUG] Converting audio data numpy array to torch.Tensor for {wav_path}")
         audio_tensor: torch.Tensor = torch.from_numpy(audio_data_array).float()
 
+        # Apply temporal slicing: use only part of the full audio stream from the .WAV file
+        end_sample_index: int = int(self.duration_seconds * self.sample_rate)
+        print(f"[DEBUG] Instead of {len(audio_data_array)}, truncating end time to {end_sample_index} samples ({self.duration_seconds} seconds)")
+        # Slice the audio tensor along the time dimension (dim=1)
+        sliced_audio_tensor: torch.Tensor = audio_tensor[:, 0:end_sample_index]
+
         # Load JSON configuration for ground truth labels
         #print(f"[DEBUG] Loading Serum2 config data from {json_path}")
         #print(f"[DEBUG] Config data str(json_path) = {str(json_path)}")
@@ -653,7 +659,7 @@ class AudioFilterPredictorModule(LightningModule):
             lr=self.learning_rate,
             weight_decay=1e-2,#1e-4,  # L2 regularization to prevent overfitting on niche filters
             betas=(0.9, 0.995),
-            foreach=True,
+            #foreach=True,
             # https://discuss.pytorch.org/t/nan-loss-issues-with-precision-16-in-pytorch-lightning-gan-training/204369/7
             eps=1e-6,
         )
@@ -712,7 +718,20 @@ def parse_cli_arguments() -> argparse.Namespace:
         type=float,
         default=None,
         help=f"Float factor by which to reduce the full dataset size (default: None)."
-    )# Training hyperparameters
+    )
+    parser.add_argument(
+        "--start_offset_seconds",
+        type=float,
+        default=0.000,
+        help="Start time in seconds to skip pre-trigger silence. Set >0.010 if attack transients are lost. Default: 0.000"
+    )
+    parser.add_argument(
+        "--duration_seconds",
+        type=float,
+        default=1.1,
+        help="Active analysis window duration in seconds. Trims silent decay tails to improve SNR and reduce VRAM. Default: 1.1"
+    )
+    # Training hyperparameters
     parser.add_argument(
         "--num_epochs",
         type=int,
@@ -786,7 +805,7 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
     full_dataset = AudioFilterPredictionDataset(
         dataset_directory=cli_arguments.dataset_dir,
         sample_rate=48000,
-        duration_seconds=1.1,
+        duration_seconds=cli_arguments.duration_seconds,#1.1, #1.016, # 1 ms attack, 1000 ms decay/sustain, 15 ms release
         n_fft=STFT_N_FFT,
         hop_length=STFT_HOP_LENGTH,
         fast_dev_run_size=cli_arguments.fast_dev_run_size,
@@ -810,28 +829,6 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
 
     num_classes: int = data_module.train_dataset.dataset.num_classes
     class_weights: torch.Tensor = data_module.train_dataset.dataset.class_weights
-
-    print(f"[DEBUG] Instantiating `model_instance = AudioFilterPredictorModule()`")
-    model_instance = AudioFilterPredictorModule(
-        num_filter_classes=num_classes,
-        learning_rate=cli_arguments.learning_rate,
-        optimizer_type=cli_arguments.optimizer,
-        class_weights=class_weights,
-    )
-    print(f"[DEBUG] Is model on GPU? {model_instance.on_gpu}")
-
-    # Create dummy input matching exact training pipeline shape: [batch, 4 channels, freq_bins, time_frames]
-    dummy_spectrogram_input = torch.randn(cli_arguments.batch_size, 4, 1025, 413)
-    dummy_batch = [{"spectrogram_input": dummy_spectrogram_input}]
-    torchinfo_device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torchinfo.summary(
-        model=model_instance,
-        input_data=dummy_batch,
-        col_names=["input_size", "output_size", "num_params", "mult_adds"],
-        row_settings=["var_names"],
-        verbose=1,
-        device=torchinfo_device,  # Use CPU for static analysis; GPU memory estimates differ slightly due to AMP/caching
-    )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     checkpoint_filename = f"{timestamp}_" + "{epoch:04d}_{val_accuracy:.4g}_{val_total_loss:.4g}_{val_cls_loss:.4g}_{val_freq_loss:.4g}"
@@ -865,16 +862,51 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
 
     trainer: Trainer = Trainer(
         max_epochs=cli_arguments.num_epochs,
-        accelerator='gpu' if torch.cuda.is_available() else 'cpu',
+        accelerator='cuda' if torch.cuda.is_available() else 'cpu',
         devices=1,             # Single GPU for MVP; scales to multi-GPU via DDP
         strategy="auto",
         callbacks=[checkpoint_callback, rich_model_summary, device_stats_monitor, time_stats_monitor, EMAWeightAveraging(), RichProgressBar()],
         logger=tensorboard_logger,
         log_every_n_steps=10,
-        precision="16-mixed",  # Mixed precision for speed, which is probably not significantly worse than "32-true" speed.
+        precision="bf16-mixed",  # Mixed precision for speed, which is probably not significantly worse than "32-true" speed.
         gradient_clip_val=1.0, # Prevents gradient explosion OOMs during early training instability
         accumulate_grad_batches=DEFAULT_ACCUMULATE_GRAD_BATCHES,
         profiler="simple",
+    )
+
+    print(f"[DEBUG] Instantiating `model_instance = AudioFilterPredictorModule()`")
+    with trainer.init_module():
+        model_instance = AudioFilterPredictorModule(
+            num_filter_classes=num_classes,
+            learning_rate=cli_arguments.learning_rate,
+            optimizer_type=cli_arguments.optimizer,
+            class_weights=class_weights,
+        )
+    print(f"[DEBUG] Is model on GPU? {model_instance.on_gpu}")
+
+    # Create dummy input matching exact training pipeline shape: [batch, 4 channels, freq_bins, time_frames]
+    #dummy_spectrogram_input = torch.randn(cli_arguments.batch_size, 4, 1025, 413)
+
+    # Compute exact STFT time frames based on actual audio window duration
+    # Formula: ceil((duration_seconds * sample_rate) / hop_length) + 1 (for safety margin in some STFT implementations)
+    expected_time_frames: int = math.ceil((cli_arguments.duration_seconds * cli_arguments.sample_rate) / cli_arguments.hop_length) + 1
+    # Create dummy input matching exact training pipeline shape: [batch, 4 channels, freq_bins, time_frames]
+    # Using dynamic calculation prevents profile mismatches and ensures benchmark accuracy
+    dummy_spectrogram_input = torch.randn(
+        cli_arguments.batch_size,
+        4,                    # left and right audio channels * real and imaginary parts of STFT
+        STFT_N_FFT // 2 + 1,  # Frequency bins: n_fft/2 + 1 for real-valued STFT
+        expected_time_frames  # Time frames: dynamically computed from duration & hop
+    )
+    dummy_batch = [{"spectrogram_input": dummy_spectrogram_input}]
+    torchinfo_device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torchinfo.summary(
+        model=model_instance,
+        input_data=dummy_batch,
+        col_names=["input_size", "output_size", "num_params", "mult_adds"],
+        row_settings=["var_names"],
+        verbose=1,
+        device=torchinfo_device,  # Use CPU for static analysis; GPU memory estimates differ slightly due to AMP/caching
     )
 
     print(f"[INFO] Starting training with {num_classes} filter classes.")
