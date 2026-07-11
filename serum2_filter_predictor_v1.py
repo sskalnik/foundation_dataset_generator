@@ -2,7 +2,7 @@
 Audio Filter Type & Frequency Predictor MVP
 ============================================
 Predicts synthesizer filter type (108 classes) and frequency parameter (8-22050 Hz)
-from 32-bit float, 48kHz stereo WAV files using PyTorch Lightning.
+from 32-bit float, 48 kHz stereo WAV files using PyTorch Lightning.
 
 Design Rationale:
 - Shared CNN encoder + two prediction heads (frequency regression, categorical classification)
@@ -12,7 +12,7 @@ Design Rationale:
 - Fully configurable via argparse CLI
 
 Trade-off Summary (Memory vs. Compute vs. Quality):
-1. Fixed 1.1s window at 48kHz = 52,992 samples. STFT with hop=256 yields ~207 time frames.
+1. Fixed 1.1s window at 48 kHz = 52,992 samples. STFT with hop=256 yields ~207 time frames.
    This keeps memory predictable but may alias very fast transient filter sweeps if hop is too large.
    We use hop=128 to preserve temporal resolution, accepting a ~2x increase in sequence length.
 2. 4-channel complex spectrogram replaces single-channel magnitude. Quadruples input dimensionality,
@@ -65,13 +65,13 @@ torch.backends.cudnn.benchmark = True
 # For log-frequency regression targets (range ~2.1 to ~9.9), the quantization noise is ~1e-4,
 # which is smaller than typical batch-to-batch label variance.
 # Classification heads are inherently robust to sub-FP32 precision.
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision('medium')
 
 # ============================================================================
 # CONFIGURATION & DEFAULTS
 # ============================================================================
 DEFAULT_TRAIN_WORKERS: int = 4
-DEFAULT_VAL_WORKERS: int = 4
+DEFAULT_VAL_WORKERS: int = 2
 DEFAULT_BATCH_SIZE: int = 16
 DEFAULT_ACCUMULATE_GRAD_BATCHES: int = 2  # Maintain effective batch size of 2x for gradient stability
 DEFAULT_PREFETCH_FACTOR: int = 2
@@ -82,10 +82,11 @@ DEFAULT_OPTIMIZER_TYPE: str = "cawr"
 # The original project was just to predict low-pass filter frequencies, then types
 DEFAULT_RAW_DATASET_DIR: str = r'./renders/lpf_mvp'
 DEFAULT_MODEL_OUTPUT_DIR: str = r'./models'
-
+# It's 2026, and this is the gold standard: 48 kHz 32-bit floating-point PCM
+DEFAULT_SAMPLE_RATE: int = 48_000
 # STFT Hyperparameters (chosen to balance temporal resolution vs. VRAM usage)
 STFT_N_FFT: int = 2048          # Frequency resolution: ~23 Hz per bin at 48kHz
-STFT_HOP_LENGTH: int = 128      # Temporal resolution: preserves fast filter transients
+STFT_HOP_LENGTH: int = 256#128      # Temporal resolution: preserves fast filter transients
 STFT_WIN_LENGTH: Optional[int] = None  # Defaults to n_fft
 STFT_WINDOW_FN: str = "hann_window"
 
@@ -145,7 +146,7 @@ class AudioFilterPredictionDataset(Dataset):
     def __init__(
         self,
         dataset_directory: str = DEFAULT_RAW_DATASET_DIR,
-        sample_rate: int = 48000,
+        sample_rate: int = DEFAULT_SAMPLE_RATE,
         duration_seconds: float = 1.1,
         n_fft: int = STFT_N_FFT,
         hop_length: int = STFT_HOP_LENGTH,
@@ -289,6 +290,7 @@ class AudioFilterPredictionDataset(Dataset):
         #print(f"[DEBUG] Generating spectrogram for left/right * real/imaginary for audio Tensor based on {wav_path}")
         stft_real_left, stft_imag_left = self._compute_stft_channels(audio_tensor[0, :])
         stft_real_right, stft_imag_right = self._compute_stft_channels(audio_tensor[1, :])
+        #print(f"[DEBUG] Size of stft_real_left = {stft_real_left.nbytes}. Size of stft_imag_left = {stft_imag_left.nbytes}.")
 
         # Stack into 4-channel input: [real_L, imag_L, real_R, imag_R]
         spectrogram_input: torch.Tensor = torch.stack([
@@ -387,6 +389,7 @@ class AudioFilterDataModule(LightningDataModule):
             pin_memory=True,  # Faster CPU->GPU transfer on CUDA systems
             persistent_workers=True if self.train_workers > 0 else False,
             multiprocessing_context='spawn',  # Better for Windows
+            shuffle=True,
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -418,7 +421,7 @@ class FrequencyPerceptualMSELoss(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.register_buffer("sample_rate_buffer", torch.tensor(48000.0))
+        self.register_buffer("sample_rate_buffer", torch.tensor(1.0 * DEFAULT_SAMPLE_RATE))
 
     @staticmethod
     def _hz_to_erb(hz_values: torch.Tensor) -> torch.Tensor:
@@ -488,12 +491,12 @@ class AudioFilterPredictorModule(LightningModule):
 
         # Shared feature extractor (4 input channels: real_L, imag_L, real_R, imag_R)
         self.shared_encoder: nn.Sequential = nn.Sequential(
-            nn.Conv2d(in_channels=4, out_channels=32, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(in_channels=4, out_channels=32, kernel_size=5, stride=1, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2),  # Halves time & freq resolution
 
-            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2),
@@ -804,7 +807,7 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
     print(f"[DEBUG] Instantiating `full_dataset = AudioFilterPredictionDataset()`")
     full_dataset = AudioFilterPredictionDataset(
         dataset_directory=cli_arguments.dataset_dir,
-        sample_rate=48000,
+        sample_rate=DEFAULT_SAMPLE_RATE,
         duration_seconds=cli_arguments.duration_seconds,#1.1, #1.016, # 1 ms attack, 1000 ms decay/sustain, 15 ms release
         n_fft=STFT_N_FFT,
         hop_length=STFT_HOP_LENGTH,
@@ -889,7 +892,7 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
 
     # Compute exact STFT time frames based on actual audio window duration
     # Formula: ceil((duration_seconds * sample_rate) / hop_length) + 1 (for safety margin in some STFT implementations)
-    expected_time_frames: int = math.ceil((cli_arguments.duration_seconds * 48_000) / STFT_HOP_LENGTH) + 1
+    expected_time_frames: int = math.ceil((cli_arguments.duration_seconds * DEFAULT_SAMPLE_RATE) / STFT_HOP_LENGTH) + 1
     # Create dummy input matching exact training pipeline shape: [batch, 4 channels, freq_bins, time_frames]
     # Using dynamic calculation prevents profile mismatches and ensures benchmark accuracy
     dummy_spectrogram_input = torch.randn(
@@ -1019,8 +1022,8 @@ def run_inference_mode(cli_arguments: argparse.Namespace) -> None:
         dtype="float32"
     )
 
-    if loaded_sample_rate != 48000:
-        print(f"[WARN] Sample rate mismatch: expected 48kHz, got {loaded_sample_rate}Hz. Resampling may affect predictions.")
+    if loaded_sample_rate != DEFAULT_SAMPLE_RATE:
+        print(f"[WARN] Sample rate mismatch: expected 48 kHz, got {loaded_sample_rate} Hz. Resampling may affect predictions.")
 
     # Ensure stereo shape (channels=2, samples)
     if raw_audio_array.ndim == 1:
