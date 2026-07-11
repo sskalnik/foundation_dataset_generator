@@ -86,7 +86,7 @@ DEFAULT_MODEL_OUTPUT_DIR: str = r'./models'
 DEFAULT_SAMPLE_RATE: int = 48_000
 # STFT Hyperparameters (chosen to balance temporal resolution vs. VRAM usage)
 STFT_N_FFT: int = 2048          # Frequency resolution: ~23 Hz per bin at 48kHz
-STFT_HOP_LENGTH: int = 256#128      # Temporal resolution: preserves fast filter transients
+STFT_HOP_LENGTH: int = 128      # Temporal resolution: preserves fast filter transients
 STFT_WIN_LENGTH: Optional[int] = None  # Defaults to n_fft
 STFT_WINDOW_FN: str = "hann_window"
 
@@ -298,7 +298,7 @@ class AudioFilterPredictionDataset(Dataset):
             stft_imag_left,
             stft_real_right,
             stft_imag_right
-        ], dim=0)
+        ], dim=0).half()
 
         return {
             "spectrogram_input": spectrogram_input,
