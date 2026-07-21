@@ -185,6 +185,80 @@ class AudioFilterPredictionDataset(Dataset):
             power=None
         )
 
+        # Normal = [
+        #   'MG Low 6', 'MG Low 12', 'MG Low 18', 'MG Low 24',
+        #   'Low 6', 'Low 12', 'Low 18', 'Low 24',
+        #   'High 6', 'High 12', 'High 18', 'High 24',
+        #   'Band 12', 'Band 24',
+        #   'Peak 12', 'Peak 24',
+        #   'Notch 12', 'Notch 24'
+        # ]
+        #
+        # Multi = [
+        #   'LH 6', 'LH 12', 'LB 12', 'LP 12', 'LN 12', 'HB 12', 'HP 12', 'HN 12', 'BP 12', 'BN 12', 'PP 12', 'PN 12', 'NN 12',
+        #   'L/B/H 12', 'L/B/H 24', 'L/P/H 12', 'L/P/H 24', 'L/N/H 12', 'L/N/H 24', 'B/P/N 12', 'B/P/N 24'
+        # ]
+        #
+        # Flanges = [
+        #   'Cmb +', 'Cmb -', 'Cmb L6+', 'Cmb L6-', 'Cmb H6+', 'Cmb H6-', 'Cmb HL6+', 'Cmb HL6-',
+        #   'Flg +', 'Flg -', 'Flg L6+', 'Flg L6-', 'Flg H6+', 'Flg H6-', 'Flg HL6+', 'Flg HL6-',
+        #   'Phs 12+', 'Phs 12-', 'Phs 24+', 'Phs 24-', 'Phs 36+', 'Phs 36-', 'Phs 48+', 'Phs 48-',
+        #   'Phs 48L6+', 'Phs 48L6-', 'Phs 48H6+', 'Phs 48H6-', 'Phs 48HL6+', 'Phs 48HL6-',
+        #   'FPhs 12HL6+', 'FPhs 12HL6-'
+        # ]
+        #
+        # Misc = [
+        #   'Low EQ 6', 'Low EQ 12', 'Band EQ 12', 'High EQ 6', 'High EQ 12',
+        #   'Ring Mod', 'Ring Modx2', 'SampHold', 'SampHold-', 'Combs', 'Allpasses', 'Reverb',
+        #   'French LP', 'German LP', 'Add Bass', 'Formant-I', 'Formant-II', 'Formant-III', 'Bandreject',
+        #   'Dist.Comb 1 LP', 'Dist.Comb 1 BP', 'Dist.Comb 2 LP', 'Dist.Comb 2 BP', 'Scream LP', 'Scream BP'
+        # ]
+        #
+        # S2_Filters = [
+        #   'Wsp', 'DJ Mixer', 'Diffusor', 'MG Ladder', 'Acid Ladder', 'EMS Ladder', 'MG Dirty', 'PZ SVF', 'Comb 2', 'Exp MM', 'Exp BPF', 'K35'
+        # ]
+        #
+        # Hierarchical Taxonomy (Hardcoded to 108 filter types in Serum 2)
+        self.filter_hierarchy_mapping = {
+            'MG Low 6': (0, 0, 0), 'MG Low 12': (0, 0, 1), 'MG Low 18': (0, 0, 2), 'MG Low 24': (0, 0, 3),
+            'Low 6': (0, 1, 4), 'Low 12': (0, 1, 5), 'Low 18': (0, 1, 6), 'Low 24': (0, 1, 7),
+            'High 6': (0, 2, 8), 'High 12': (0, 2, 9), 'High 18': (0, 2, 10), 'High 24': (0, 2, 11),
+            'Band 12': (0, 3, 12), 'Band 24': (0, 3, 13), 'Peak 12': (0, 4, 14), 'Peak 24': (0, 4, 15),
+            'Notch 12': (0, 5, 16), 'Notch 24': (0, 5, 17),
+            'LH 6': (1, 0, 18), 'LH 12': (1, 0, 19), 'LB 12': (1, 1, 20), 'LP 12': (1, 2, 21),
+            'LN 12': (1, 3, 22), 'HB 12': (1, 4, 23), 'HP 12': (1, 5, 24), 'HN 12': (1, 6, 25),
+            'BP 12': (1, 7, 26), 'BN 12': (1, 8, 27), 'PP 12': (1, 9, 28), 'PN 12': (1, 10, 29),
+            'NN 12': (1, 11, 30), 'L/B/H 12': (1, 12, 31), 'L/B/H 24': (1, 12, 32),
+            'L/P/H 12': (1, 13, 33), 'L/P/H 24': (1, 13, 34), 'L/N/H 12': (1, 14, 35), 'L/N/H 24': (1, 14, 36),
+            'B/P/N 12': (1, 15, 37), 'B/P/N 24': (1, 15, 38),
+            'Cmb +': (2, 0, 39), 'Cmb -': (2, 0, 40), 'Cmb L6+': (2, 0, 41), 'Cmb L6-': (2, 0, 42),
+            'Cmb H6+': (2, 0, 43), 'Cmb H6-': (2, 0, 44), 'Cmb HL6+': (2, 0, 45), 'Cmb HL6-': (2, 0, 46),
+            'Flg +': (2, 1, 47), 'Flg -': (2, 1, 48), 'Flg L6+': (2, 1, 49), 'Flg L6-': (2, 1, 50),
+            'Flg H6+': (2, 1, 51), 'Flg H6-': (2, 1, 52), 'Flg HL6+': (2, 1, 53), 'Flg HL6-': (2, 1, 54),
+            'Phs 12+': (2, 2, 55), 'Phs 12-': (2, 2, 56), 'Phs 24+': (2, 2, 57), 'Phs 24-': (2, 2, 58),
+            'Phs 36+': (2, 2, 59), 'Phs 36-': (2, 2, 60), 'Phs 48+': (2, 2, 61), 'Phs 48-': (2, 2, 62),
+            'Phs 48L6+': (2, 2, 63), 'Phs 48L6-': (2, 2, 64), 'Phs 48H6+': (2, 2, 65), 'Phs 48H6-': (2, 2, 66),
+            'Phs 48HL6+': (2, 2, 67), 'Phs 48HL6-': (2, 2, 68), 'FPhs 12HL6+': (2, 3, 69), 'FPhs 12HL6-': (2, 3, 70),
+            'Low EQ 6': (3, 0, 71), 'Low EQ 12': (3, 0, 72), 'Band EQ 12': (3, 1, 73),
+            'High EQ 6': (3, 2, 74), 'High EQ 12': (3, 2, 75), 'Ring Mod': (3, 3, 76), 'Ring Modx2': (3, 3, 77),
+            'SampHold': (3, 4, 78), 'SampHold-': (3, 4, 79), 'Combs': (3, 5, 80), 'Allpasses': (3, 5, 81),
+            'Reverb': (3, 6, 82), 'French LP': (3, 7, 83), 'German LP': (3, 7, 84), 'Add Bass': (3, 8, 85),
+            'Formant-I': (3, 9, 86), 'Formant-II': (3, 9, 87), 'Formant-III': (3, 9, 88), 'Bandreject': (3, 10, 89),
+            'Dist.Comb 1 LP': (3, 11, 90), 'Dist.Comb 1 BP': (3, 11, 91), 'Dist.Comb 2 LP': (3, 11, 92), 'Dist.Comb 2 BP': (3, 11, 93),
+            'Scream LP': (3, 12, 94), 'Scream BP': (3, 12, 95), 'Wsp': (4, 0, 96), 'DJ Mixer': (4, 1, 97),
+            'Diffusor': (4, 2, 98), 'MG Ladder': (4, 3, 99), 'Acid Ladder': (4, 3, 100), 'EMS Ladder': (4, 3, 101),
+            'MG Dirty': (4, 4, 102), 'PZ SVF': (4, 5, 103), 'Comb 2': (4, 6, 104), 'Exp MM': (4, 7, 105),
+            'Exp BPF': (4, 8, 106), 'K35': (4, 9, 107)
+        }
+
+        # Compute unique mid-level subtype combinations to create a deterministic global index space
+        unique_mid_combos = sorted(list(set((v[0], v[1]) for v in self.filter_hierarchy_mapping.values())))
+        self.mid_level_index_map: Dict[Tuple[int, int], int] = {combo: idx for idx, combo in enumerate(unique_mid_combos)}
+        # Taxonomy dimensions
+        self.num_categories: int = 5
+        self.num_subtypes: int = len(unique_mid_combos)
+        self.num_variants: int = 108
+
     def _compute_stft_channels(self, channel_audio_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Computes Short-Time Fourier Transform for a single audio channel.
@@ -328,10 +402,14 @@ class AudioFilterPredictionDataset(Dataset):
         # Direct cache access. Zero STFT computation, zero numpy-pytorch conversion overhead.
         # This makes DataLoader workers nearly I/O-free during training.
         spectrogram_tensor: torch.Tensor = self.cached_spectrograms[idx]
+
         # Retrieve pre-computed metadata (stored as Python objects for type safety)
         log_frequency_target: float = self.cached_frequency_targets[idx]
         filter_1_type: str = self.cached_filter_1_types[idx]
         filter_1_freq_hz: float = self.cached_filter_1_freqs_hz[idx]
+
+        # Map categorical label to integer index
+        label_index: int = self.filter_type_to_index[filter_1_type]
 
         # Store filter type and hierarchy metadata alongside Tensors.
         hierarchy_tuple = self.filter_hierarchy_mapping[filter_1_type]
@@ -476,6 +554,53 @@ class FrequencyPerceptualMSELoss(nn.Module):
         return weighted_loss
 
 
+class SqueezeAndExcitation(nn.Module):
+    """
+    Squeeze-and-Excitation block for channel-wise feature recalibration.
+
+    Trade-off Analysis:
+    - Adds ~0.3% parameter count relative to the CNN encoder.
+    - Introduces a sequential dependency (global avg pool -> FC -> sigmoid -> scale),
+      which slightly reduces GPU parallelism but is negligible on RTX 40xx series.
+    - Computationally lightweight: O(C^2) where C is channel count. For C=128, this is ~16k ops per feature map.
+    - Chosen reduction ratio of 8 balances expressiveness vs. overfitting. Higher ratios (4)
+      risk memorizing dataset-specific channel biases; lower ratios (16) under-utilize
+      inter-channel dependencies.
+    """
+    def __init__(self, channels: int, reduction_ratio: int = 8) -> None:
+        super().__init__()
+        self.squeeze_dimension: int = max(channels // reduction_ratio, 1)
+
+        self.channel_squeeze_layer: nn.Sequential = nn.Sequential(
+            nn.Linear(in_features=channels, out_features=self.squeeze_dimension),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_features=self.squeeze_dimension, out_features=channels),
+            nn.Sigmoid()
+        )
+    def forward(self, features_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Computes channel-wise attention weights and scales input features.
+
+        Args:
+            features_tensor: [batch, channels, height, width]
+        Returns:
+            Scaled feature tensor with recalibrated channel importance.
+        """
+        # Squeeze: Global average pooling over spatial dimensions (time & freq bins)
+        # Produces per-channel descriptor capturing global context
+        squeezed_descriptor: torch.Tensor = torch.mean(features_tensor, dim=[2, 3], keepdim=True)
+
+        # Excitation: Learn non-linear channel dependencies
+        # MLP bottleneck compresses then expands to model inter-channel interactions
+        excitation_weights: torch.Tensor = self.channel_squeeze_layer(squeezed_descriptor.squeeze(dim=[2, 3]))
+
+        # Reshape for broadcasting across spatial dimensions
+        excitation_weights_reshaped: torch.Tensor = excitation_weights.unsqueeze(2).unsqueeze(3)
+
+        # Scale: Multiply original features by learned attention weights
+        return features_tensor * excitation_weights_reshaped
+
+
 class AudioFilterPredictorModule(LightningModule):
     """
     Multi-task PyTorch Lightning module with shared CNN encoder and dual prediction heads.
@@ -491,6 +616,8 @@ class AudioFilterPredictorModule(LightningModule):
     def __init__(
         self,
         num_filter_classes: int,
+        num_categories: int,
+        num_subtypes: int,
         learning_rate: float = DEFAULT_LEARNING_RATE,
         optimizer_type: str = DEFAULT_OPTIMIZER_TYPE,
         class_weights: torch.Tensor = None,
@@ -514,17 +641,22 @@ class AudioFilterPredictorModule(LightningModule):
         print(f"[INFO] ema_decay = {self.ema_decay}")
 
         # Shared feature extractor (4 input channels: real_L, imag_L, real_R, imag_R)
+        # with SE blocks inserted after conv blocks 1 & 2
+        # SE forces the network to focus on discriminative frequency bands early, reducing gradient noise from irrelevant bins.
         self.shared_encoder: nn.Sequential = nn.Sequential(
+            # Block 1: Low-level spectral pattern extraction
             nn.Conv2d(in_channels=4, out_channels=32, kernel_size=5, stride=1, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
+            SqueezeAndExcitation(channels=32, reduction_ratio=8),  # Recalibrate low-level features
             nn.MaxPool2d(kernel_size=2, stride=2),  # Halves time & freq resolution
-
+            # Block 2: Mid-level architecture pattern extraction
             nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
+            SqueezeAndExcitation(channels=64, reduction_ratio=8),  # Recalibrate mid-level features
             nn.MaxPool2d(kernel_size=2, stride=2),
-
+            # Block 3: High-level filter type discrimination (no SE needed here; pooling handles context)
             nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
@@ -543,8 +675,21 @@ class AudioFilterPredictorModule(LightningModule):
             nn.Linear(in_features=32, out_features=1),  # Predicts log-frequency
         )
 
+        # Hierarchical Classification Heads
+        self.category_classification_head: nn.Sequential = nn.Sequential(
+            nn.Linear(in_features=128, out_features=64),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_features=64, num_categories),
+        )
+
+        self.subtype_classification_head: nn.Sequential = nn.Sequential(
+            nn.Linear(in_features=128, out_features=64),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_features=64, num_subtypes),
+        )
+
         # Prediction Head 2: Filter Type Classification (Categorical)
-        self.filter_type_classification_head: nn.Sequential = nn.Sequential(
+        self.variant_classification_head: nn.Sequential = nn.Sequential(
             nn.Linear(in_features=128, out_features=64),
             nn.ReLU(inplace=True),
             nn.Linear(in_features=64, out_features=num_filter_classes),  # Raw logits for CrossEntropyLoss
@@ -553,8 +698,10 @@ class AudioFilterPredictorModule(LightningModule):
         # Loss functions
         print('[INFO] frequency_loss_fn = FrequencyPerceptualMSELoss()')
         self.frequency_loss_fn: FrequencyPerceptualMSELoss = FrequencyPerceptualMSELoss()
-        print('[INFO] classification_loss_fn = nn.CrossEntropyLoss()')
-        self.classification_loss_fn: nn.CrossEntropyLoss = nn.CrossEntropyLoss(
+        self.category_classification_loss_fn: nn.CrossEntropyLoss = nn.CrossEntropyLoss(reduction="mean")
+        self.subtype_classification_loss_fn: nn.CrossEntropyLoss = nn.CrossEntropyLoss(reduction="mean")
+        print('[INFO] variant_classification_loss_fn = nn.CrossEntropyLoss()')
+        self.variant_classification_loss_fn: nn.CrossEntropyLoss = nn.CrossEntropyLoss(
             weight=self.class_weights,
             reduction="mean"
         )
@@ -603,11 +750,15 @@ class AudioFilterPredictorModule(LightningModule):
 
         # Predict frequency (log-space) and filter type (logits)
         predicted_log_frequency: torch.Tensor = self.frequency_regression_head(flattened_latent)
-        predicted_filter_logits: torch.Tensor = self.filter_type_classification_head(flattened_latent)
+        predicted_category_logits: torch.Tensor = self.category_classification_head(flattened_latent)
+        predicted_subtype_logits: torch.Tensor = self.subtype_classification_head(flattened_latent)
+        predicted_variant_logits: torch.Tensor = self.variant_classification_head(flattened_latent)
 
         return {
             "predicted_log_frequency": predicted_log_frequency,
-            "predicted_filter_logits": predicted_filter_logits,
+            "predicted_category_logits": predicted_category_logits,
+            "predicted_subtype_logits": predicted_subtype_logits,
+            "predicted_variant_logits": predicted_variant_logits,
         }
 
     def training_step(self, batch: Dict[str, torch.Tensor], batch_index: int) -> torch.Tensor:
@@ -620,17 +771,26 @@ class AudioFilterPredictorModule(LightningModule):
             raw_target_hz=batch["raw_filter_frequency_hz"],
         )
 
-        # Compute classification loss with precomputed class weights
-        cls_loss: torch.Tensor = self.classification_loss_fn(
-            input=predictions["predicted_filter_logits"],
-            target=batch["filter_type_label"],
+        cat_loss: torch.Tensor = self.category_classification_loss_fn(
+            input=predictions["predicted_category_logits"],
+            target=batch["category_label"],
+        )
+        sub_loss: torch.Tensor = self.subtype_classification_loss_fn(
+            input=predictions["predicted_subtype_logits"],
+            target=batch["subtype_label"],
+        )
+        var_loss: torch.Tensor = self.variant_classification_loss_fn(
+            input=predictions["predicted_variant_logits"],
+            target=batch["variant_label"],
         )
 
         # Multi-task loss weighting (frequency usually has larger gradient magnitudes)
-        total_loss: torch.Tensor = freq_loss + 0.5 * cls_loss
+        total_loss: torch.Tensor = freq_loss + (HIERARCHY_CAT_WEIGHT * cat_loss) + (HIERARCHY_SUB_WEIGHT * sub_loss) + (HIERARCHY_VAR_WEIGHT * var_loss)
 
         self.log("train_freq_loss", freq_loss, prog_bar=True, logger=True)
-        self.log("train_cls_loss", cls_loss, prog_bar=True, logger=True)
+        self.log("train_cat_loss", cat_loss, prog_bar=True, logger=True)
+        self.log("train_sub_loss", sub_loss, prog_bar=True, logger=True)
+        self.log("train_var_loss", var_loss, prog_bar=True, logger=True)
         self.log("train_total_loss", total_loss, prog_bar=True, logger=True)
 
         return total_loss
@@ -644,9 +804,17 @@ class AudioFilterPredictorModule(LightningModule):
             raw_target_hz=batch["raw_filter_frequency_hz"],
         )
 
-        cls_loss: torch.Tensor = self.classification_loss_fn(
-            input=predictions["predicted_filter_logits"],
-            target=batch["filter_type_label"],
+        cat_loss: torch.Tensor = self.category_classification_loss_fn(
+            input=predictions["predicted_category_logits"],
+            target=batch["category_label"],
+        )
+        sub_loss: torch.Tensor = self.subtype_classification_loss_fn(
+            input=predictions["predicted_subtype_logits"],
+            target=batch["subtype_label"],
+        )
+        var_loss: torch.Tensor = self.variant_classification_loss_fn(
+            input=predictions["predicted_variant_logits"],
+            target=batch["variant_label"],
         )
 
         # Update EMA buffers with detached values to prevent gradient bleeding into validation graph
@@ -656,21 +824,28 @@ class AudioFilterPredictorModule(LightningModule):
         # Compute scale-invariant combined metric for monitoring & checkpointing
         val_total_loss: torch.Tensor = self._compute_normalized_combined_loss(
             freq_loss=freq_loss,
-            cls_loss=cls_loss,
+            cls_loss=var_loss,
             freq_ema=self.freq_loss_ema,
             cls_ema=self.cls_loss_ema,
         )
 
         # Compute classification accuracy for monitoring
-        predicted_classes: torch.Tensor = torch.argmax(predictions["predicted_filter_logits"], dim=1)
-        correct_predictions: torch.Tensor = (predicted_classes == batch["filter_type_label"]).sum().float()
-        total_samples: torch.Tensor = float(batch["filter_type_label"].size(0))
-        validation_accuracy: torch.Tensor = correct_predictions / total_samples
+        cat_pred = torch.argmax(predictions["predicted_category_logits"], dim=1)
+        sub_pred = torch.argmax(predictions["predicted_subtype_logits"], dim=1)
+        var_pred = torch.argmax(predictions["predicted_variant_logits"], dim=1)
 
+        cat_acc = (cat_pred == batch["category_label"]).float().mean()
+        sub_acc = (sub_pred == batch["subtype_label"]).float().mean()
+        var_acc = (var_pred == batch["variant_label"]).float().mean()
         self.log("val_freq_loss", freq_loss, prog_bar=True, logger=True)
-        self.log("val_cls_loss", cls_loss, prog_bar=True, logger=True)
+        self.log("val_cat_loss", cat_loss, prog_bar=True, logger=True)
+        self.log("val_sub_loss", sub_loss, prog_bar=True, logger=True)
+        self.log("val_var_loss", var_loss, prog_bar=True, logger=True)
         self.log("val_total_loss", val_total_loss, prog_bar=True, logger=True)
-        self.log("val_accuracy", validation_accuracy, prog_bar=True, logger=True)
+
+        self.log("val_cat_accuracy", cat_acc, prog_bar=True, logger=True)
+        self.log("val_sub_accuracy", sub_acc, prog_bar=True, logger=True)
+        self.log("val_var_accuracy", var_acc, prog_bar=True, logger=True)
 
     def configure_optimizers(self):
         """
@@ -859,6 +1034,10 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
     num_classes: int = data_module.train_dataset.dataset.num_classes
     class_weights: torch.Tensor = data_module.train_dataset.dataset.class_weights
 
+    # Extract hierarchical dimensions from the dataset mapping
+    num_categories: int = data_module.train_dataset.dataset.num_categories
+    num_subtypes: int = data_module.train_dataset.dataset.num_subtypes
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     checkpoint_filename = f"{timestamp}_" + "{epoch:04d}_{val_accuracy:.4g}_{val_total_loss:.4g}_{val_cls_loss:.4g}_{val_freq_loss:.4g}"
     checkpoint_callback = ModelCheckpoint(
@@ -878,6 +1057,8 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
         "index_to_filter_type": data_module.train_dataset.dataset.index_to_filter_type,
         "num_classes": num_classes,
         "class_counts": dict(data_module.train_dataset.dataset.class_counts),
+        "category_index_to_name": data_module.train_dataset.dataset.category_index_to_name,
+        "subtype_index_to_name": {f"{k[0]}_{k[1]}": v for k, v in data_module.train_dataset.dataset.subtype_index_to_name.items()},
     }
     with open(metadata_path, 'w') as f:
         json.dump(metadata_content, f, indent=2)
@@ -907,10 +1088,13 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
     with trainer.init_module():
         model_instance = AudioFilterPredictorModule(
             num_filter_classes=num_classes,
+            num_categories=num_categories,
+            num_subtypes=num_subtypes,
             learning_rate=cli_arguments.learning_rate,
             optimizer_type=cli_arguments.optimizer,
             class_weights=class_weights,
         )
+
     print(f"[DEBUG] Is model on GPU? {model_instance.on_gpu}")
 
     # Create dummy input matching exact training pipeline shape: [batch, 4 channels, freq_bins, time_frames]
@@ -938,10 +1122,11 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
         device=torchinfo_device,  # Use CPU for static analysis; GPU memory estimates differ slightly due to AMP/caching
     )
 
-    print(f"[INFO] Starting training with {num_classes} filter classes.")
+    print(f"[INFO] Starting hierarchical training with {num_categories} categories, {num_subtypes} subtypes, {num_classes} variants.")
     print(f"[INFO] Class distribution: {sorted(data_module.train_dataset.dataset.class_counts.items())}")
     print(f"[INFO] Optimizer: AdamW | Scheduler: CosineAnnealingWarmRestarts")
     print(f"[INFO] Perceptual loss weighting: ERB-scale dynamic gradient scaling")
+    print(f"[INFO] Hierarchy Loss Weights: Cat={HIERARCHY_CAT_WEIGHT}, Sub={HIERARCHY_SUB_WEIGHT}, Var={HIERARCHY_VAR_WEIGHT}")
 
     trainer.fit(model=model_instance, datamodule=data_module)
 
