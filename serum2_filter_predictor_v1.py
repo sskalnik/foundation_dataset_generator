@@ -166,11 +166,11 @@ class AudioFilterPredictionDataset(Dataset):
         self.cached_filter_1_types: List[str] = []
         self.cached_filter_1_freqs_hz: List[float] = []
         # Hierarchy & label mappings
-        self.filter_hierarchy_mapping: Dict[str, Tuple[int, int, int]] = {}
+        #self.filter_hierarchy_mapping: Dict[str, Tuple[int, int, int]] = {}
         self.mid_level_index_map: Dict[Tuple[int, int], int] = {}
-        self.num_categories: int = 5
-        self.num_subtypes: int = 0
-        self.num_variants: int = 108
+        #self.num_categories: int = 5
+        #self.num_subtypes: int = 0
+        #self.num_variants: int = 108
         self.filter_type_to_index: Dict[str, int] = {}
         self.index_to_filter_type: Dict[int, str] = {}
         self.class_counts: Dict[str, int] = {}
@@ -346,15 +346,12 @@ class AudioFilterPredictionDataset(Dataset):
             filter_1_type: str = str(config_data.get("filter_1_type"))
             filter_1_freq_hz: float = float(config_data.get("filter_1_freq_hz"))
 
-            # Map categorical label to integer index
-            label_index: int = self.filter_type_to_index[filter_1_type]
-
             # Apply log-frequency compression for regression target normalization
             # This compresses the dynamic range and aligns with human perceptual spacing
             log_frequency_target: float = math.log1p(filter_1_freq_hz)
 
             # Cache all pre-encoded features
-            self.cached_spectrograms.append(spectrogram_tensor)
+            self.cached_spectrograms.append(spectrogram_input)
             self.cached_frequency_targets.append(log_frequency_target)
             self.cached_filter_1_types.append(filter_1_type)
             self.cached_filter_1_freqs_hz.append(filter_1_freq_hz)
@@ -401,7 +398,7 @@ class AudioFilterPredictionDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         # Direct cache access. Zero STFT computation, zero numpy-pytorch conversion overhead.
         # This makes DataLoader workers nearly I/O-free during training.
-        spectrogram_tensor: torch.Tensor = self.cached_spectrograms[idx]
+        spectrogram_input: torch.Tensor = self.cached_spectrograms[idx]
 
         # Retrieve pre-computed metadata (stored as Python objects for type safety)
         log_frequency_target: float = self.cached_frequency_targets[idx]
@@ -419,7 +416,7 @@ class AudioFilterPredictionDataset(Dataset):
         variant_index: int = self.filter_type_to_index[filter_1_type]
 
         return {
-            "spectrogram_input": spectrogram_tensor,
+            "spectrogram_input": spectrogram_input,
             "log_frequency_target": torch.tensor(log_frequency_target, dtype=torch.float32),
             "raw_filter_frequency_hz": torch.tensor(filter_1_freq_hz, dtype=torch.float32),
             "category_label": torch.tensor(category_index, dtype=torch.long),
@@ -679,13 +676,13 @@ class AudioFilterPredictorModule(LightningModule):
         self.category_classification_head: nn.Sequential = nn.Sequential(
             nn.Linear(in_features=128, out_features=64),
             nn.ReLU(inplace=True),
-            nn.Linear(in_features=64, num_categories),
+            nn.Linear(in_features=64, out_features=num_categories),
         )
 
         self.subtype_classification_head: nn.Sequential = nn.Sequential(
             nn.Linear(in_features=128, out_features=64),
             nn.ReLU(inplace=True),
-            nn.Linear(in_features=64, num_subtypes),
+            nn.Linear(in_features=64, out_features=num_subtypes),
         )
 
         # Prediction Head 2: Filter Type Classification (Categorical)
@@ -1054,11 +1051,16 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
     metadata_path = Path(cli_arguments.output_dir) / "checkpoints" / f"{timestamp}_filter_metadata.json"
     print(f"[DEBUG] metadata_path = {metadata_path}")
     metadata_content: Dict[str, Any] = {
+        "num_categories": num_categories,
+        "num_subtypes": num_subtypes,
+        "num_variants": int(data_module.train_dataset.dataset.num_variants),
+        "filter_hierarchy_mapping": {k: list(v) for k, v in data_module.train_dataset.dataset.filter_hierarchy_mapping.items()},
+        "mid_level_index_map": dict(data_module.train_dataset.dataset.mid_level_index_map),
         "index_to_filter_type": data_module.train_dataset.dataset.index_to_filter_type,
         "num_classes": num_classes,
         "class_counts": dict(data_module.train_dataset.dataset.class_counts),
-        "category_index_to_name": data_module.train_dataset.dataset.category_index_to_name,
-        "subtype_index_to_name": {f"{k[0]}_{k[1]}": v for k, v in data_module.train_dataset.dataset.subtype_index_to_name.items()},
+        #"category_index_to_name": data_module.train_dataset.dataset.category_index_to_name,
+        #"subtype_index_to_name": {f"{k[0]}_{k[1]}": v for k, v in data_module.train_dataset.dataset.subtype_index_to_name.items()},
     }
     with open(metadata_path, 'w') as f:
         json.dump(metadata_content, f, indent=2)
