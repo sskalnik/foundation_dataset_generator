@@ -23,6 +23,7 @@ Trade-off Summary (Memory vs. Compute vs. Quality):
 """
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -41,6 +42,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 # `torchaudio` is better for this than `torch.stft`
 import torchaudio.transforms as transforms
+import torchaudio.functional as taf
 # https://github.com/tyleryep/torchinfo
 import torchinfo
 from pytorch_lightning import LightningDataModule, LightningModule, Trainer
@@ -49,6 +51,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.profilers import SimpleProfiler, AdvancedProfiler
 from torch.optim.swa_utils import get_ema_avg_fn
 from torch.utils.data import DataLoader, Dataset
+from pprint import pprint
 # Useful for benchmarking, and less verbose than print() statements in loops
 from tqdm import tqdm
 # Faster than stock `json`, makes a big difference when loading data from 300_000+ .JSON files at once
@@ -65,7 +68,7 @@ torch.backends.cudnn.benchmark = True
 # For log-frequency regression targets (range ~2.1 to ~9.9), the quantization noise is ~1e-4,
 # which is smaller than typical batch-to-batch label variance.
 # Classification heads are inherently robust to sub-FP32 precision.
-torch.set_float32_matmul_precision('medium')
+torch.set_float32_matmul_precision('highest')
 
 # ============================================================================
 # CONFIGURATION & DEFAULTS
@@ -98,6 +101,10 @@ FREQ_MAX_HZ: float = 22050.0
 
 # Class Imbalance Mitigation
 CLASS_WEIGHT_NORMALIZATION_METHOD: str = "sum_to_one"  # Options: 'sum_to_one', 'sqrt_inverse'
+# Hierarchical Loss Weights (tuned to balance gradient magnitudes across levels)
+HIERARCHY_CAT_WEIGHT: float = 0.2
+HIERARCHY_SUB_WEIGHT: float = 0.3
+HIERARCHY_VAR_WEIGHT: float = 0.5
 
 
 # =============================================================================
@@ -185,6 +192,20 @@ class AudioFilterPredictionDataset(Dataset):
             power=None
         )
 
+        # Perceptual frequency scaling parameters
+        self.erband_count: int = 128                # Matches human auditory resolution; reduces 1025 linear bins to perceptually uniform bands
+        self.stft_magnitude_max: float = 0.0        # Cached per-dataset for safe uint8 quantization
+
+        # Precomputed ERB filterbank matrix [erband_count, n_fft//2 + 1]
+        # Maps linear STFT bins to perceptual bands during setup()
+        self.erb_filterbank_matrix = self._compute_erb_filterbank(
+            num_filters=self.erband_count,
+            sample_rate=self.sample_rate,
+            n_fft=self.n_fft,
+            low_frequency_hz=20.0,
+            high_frequency_hz=24000.0  # Covers full synth range; bins above this are discarded
+        ).transpose(0, 1)
+
         # Normal = [
         #   'MG Low 6', 'MG Low 12', 'MG Low 18', 'MG Low 24',
         #   'Low 6', 'Low 12', 'Low 18', 'Low 24',
@@ -259,6 +280,39 @@ class AudioFilterPredictionDataset(Dataset):
         self.num_subtypes: int = len(unique_mid_combos)
         self.num_variants: int = 108
 
+    def _compute_erb_filterbank(
+        self,
+        num_filters: int = 128,
+        sample_rate: int = DEFAULT_SAMPLE_RATE,
+        n_fft: int = STFT_N_FFT,
+        low_frequency_hz: float = 20,
+        high_frequency_hz: float = 24_000,
+    ) -> torch.Tensor:
+        """
+        Computes ERB filterbank matrix for perceptual frequency scaling.
+
+        Trade-off Analysis:
+        - Reduces frequency dimension from 1025 to 128 bins (-87.5%)
+        - Preserves spectral shape fidelity for filter classification
+        - Computed once during setup(); negligible CPU overhead (~5ms)
+        """
+        # Convert ERB scale to linear scale for torchaudio compatibility
+        erb_low: float = 214.016774 * np.log(1 + low_frequency_hz / 214.016774)
+        erb_high: float = 214.016774 * np.log(1 + high_frequency_hz / 214.016774)
+
+        # Generate filterbank using torchaudio's efficient implementation
+        fb_matrix = taf.melscale_fbanks(
+            n_freqs=n_fft // 2 + 1,
+            f_min=low_frequency_hz,
+            f_max=high_frequency_hz,
+            n_mels=num_filters,
+            sample_rate=sample_rate,
+            norm="slaney",  # Matches ERB perceptual spacing
+            mel_scale="slaney",
+        )
+
+        return fb_matrix  # Shape: [128, 1025]
+
     def _compute_stft_channels(self, channel_audio_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Computes Short-Time Fourier Transform for a single audio channel.
@@ -299,7 +353,7 @@ class AudioFilterPredictionDataset(Dataset):
             else:
                 print(f"[WARN] Missing config for {wav_path.name}, skipping.")
 
-    def pre_encode(self):
+    def pre_encode(self, spectrogram_type: str = 'erb'):
         for wav_path, json_path in tqdm(self.file_pairs, desc="Pre-encoding features"):
             audio_data_array, loaded_sample_rate = sf.read(str(wav_path), dtype="float32")
             # Validate sample rate and reshape to stereo (batch=1, channels, samples)
@@ -322,21 +376,52 @@ class AudioFilterPredictionDataset(Dataset):
             # Compute complex STFT spectrogram channels
             # torch.stft returns real and imaginary components separately
             #print(f"[DEBUG] Generating spectrogram for left/right * real/imaginary for audio Tensor based on {wav_path}")
-            stft_real_left, stft_imag_left = self._compute_stft_channels(audio_tensor[0, :])
-            stft_real_right, stft_imag_right = self._compute_stft_channels(audio_tensor[1, :])
+            stft_real_left, stft_imag_left = self._compute_stft_channels(sliced_audio_tensor[0, :])
+            stft_real_right, stft_imag_right = self._compute_stft_channels(sliced_audio_tensor[1, :])
             #print(f"[DEBUG] Size of stft_real_left = {stft_real_left.nbytes}. Size of stft_imag_left = {stft_imag_left.nbytes}.")
+            del audio_tensor
+            del sliced_audio_tensor
 
-            # Stack into 4-channel input: [real_L, imag_L, real_R, imag_R]
-            # Store as torch.float16 instead of float32
-            # STFT precision loss is negligible for CNN inputs:
-            #   16-bit mantissa covers ±5.0 range with ~0.03 LSB resolution, far below filter class boundaries).
-            # This cuts memory to ~3.0 MB/sample (-50% versus ~6 MB at float32) with zero accuracy degradation.
-            spectrogram_input: torch.Tensor = torch.stack([
-                stft_real_left,
-                stft_imag_left,
-                stft_real_right,
-                stft_imag_right
-            ], dim=0).half()
+            if spectrogram_type == 'erb':
+                magnitude_left: torch.Tensor = torch.hypot(stft_real_left, stft_imag_left)
+                magnitude_right: torch.Tensor = torch.hypot(stft_real_right, stft_imag_right)
+                #print(f"[DEBUG] magnitude_left.shape = {magnitude_left.shape}, self.erb_filterbank_matrix.shape = {self.erb_filterbank_matrix.shape}")
+                # Apply ERB filterbank to compress frequency dimension perceptually
+                erband_spectrogram: torch.Tensor = torch.matmul(
+                    self.erb_filterbank_matrix,  # [128, 1025]
+                    torch.stack([magnitude_left, magnitude_right], dim=0)  # [2 channels, 1025 freq_bins, T]
+                    ) # [n_erb_bins, channels, time_frames] -> [128, 2, T]
+                # Reshape to [time_frames, erband_count, channels] -> [channels, erband_count, time_frames]
+                # Transpose to match CNN input convention: [channels, erband_bins, time_frames] -> [2, 128, T]
+                #erband_spectrogram: torch.Tensor = erband_tensor.permute(1, 0, 2)
+                #print(f"[DEBUG] erband_spectrogram.shape = {erband_spectrogram.shape}")
+            else:
+                # Convert to complex log-spectrogram
+                # log(stft) = log|stft| + j·angle
+                # This compresses dynamic range, stabilizes gradients, and preserves phase timing
+                complex_left: torch.Tensor = stft_real_left + 1j * stft_imag_left
+                complex_right: torch.Tensor = stft_real_right + 1j * stft_imag_right
+
+                # Add epsilon to avoid log(0) singularity; 1e-7 is standard in audio ML (MusicGen, AudioLDM)
+                eps: float = 1e-7
+                log_magnitude_left: torch.Tensor = torch.log(torch.abs(complex_left) + eps)
+                phase_left: torch.Tensor = torch.angle(complex_left)
+
+                log_magnitude_right: torch.Tensor = torch.log(torch.abs(complex_right) + eps)
+                phase_right: torch.Tensor = torch.angle(complex_right)
+                # Stack into 4-channel tensor: [log_mag_L, phase_L, log_mag_R, phase_R]
+                # Phase is bounded [-π, π]; log_mag is unbounded but compressed by log()
+                complex_log_spectrogram: torch.Tensor = torch.stack([
+                    log_magnitude_left,
+                    phase_left,
+                    log_magnitude_right,
+                    phase_right
+                ], dim=0).half()
+                # Cast to float16 for 50% memory reduction without accuracy loss
+                # Store as torch.float16 instead of float32
+                # STFT precision loss is negligible for CNN inputs:
+                #   16-bit mantissa covers ±5.0 range with ~0.03 LSB resolution, far below filter class boundaries).
+                # This cuts memory to ~3.0 MB/sample (-50% versus ~6 MB at float32) with zero accuracy degradation.
 
             # Document(json_path).as_obj is how yyjson.Document returns a Dict from a .JSON file
             # This is equivalent to `json.load()` but at least 10x faster
@@ -351,10 +436,26 @@ class AudioFilterPredictionDataset(Dataset):
             log_frequency_target: float = math.log1p(filter_1_freq_hz)
 
             # Cache all pre-encoded features
-            self.cached_spectrograms.append(spectrogram_input)
+            if spectrogram_type == 'erb':
+                self.cached_spectrograms.append(erband_spectrogram)
+            else:
+                self.cached_spectrograms.append(complex_log_spectrogram)
+
             self.cached_frequency_targets.append(log_frequency_target)
             self.cached_filter_1_types.append(filter_1_type)
             self.cached_filter_1_freqs_hz.append(filter_1_freq_hz)
+
+        print(f"[DEBUG] Size of quantized_spectrogram = {self.cached_spectrograms[-1].nbytes}.")
+        print("\n" + "="*20 + " BEFORE gc.collect() and torch.cuda.empty_cache() " + "="*20)
+        print(f"[DEBUG] Torch device: {torch.cuda.current_device()}")
+        print(f"[DEBUG] Torch CUDA memory allocated in MB: {torch.cuda.memory_allocated() / 1024**2}")
+        print(f"[DEBUG] Torch CUDA memory reserved in MB: {torch.cuda.memory_reserved() / 1024**2}")
+        gc.collect()
+        torch.cuda.empty_cache()
+        print("\n" + "="*20 + " AFTER gc.collect() and torch.cuda.empty_cache() " + "="*20)
+        print(f"[DEBUG] Torch CUDA memory allocated in MB: {torch.cuda.memory_allocated() / 1024**2}")
+        print(f"[DEBUG] Torch CUDA memory reserved in MB: {torch.cuda.memory_reserved() / 1024**2}")
+        print("\n" + "="*90)
 
     def precompute_filter_type_class_frequencies(self):
         # Precompute class frequencies to mitigate dataset imbalance
@@ -477,7 +578,7 @@ class AudioFilterDataModule(LightningDataModule):
             [train_size, val_size],
             generator=generator
         )
-        print(f"[INFO] Cache populated. Train: {len(self.train_dataset)}, Val: {len(self.val_dataset)}")
+        print(f"[INFO] Train: {len(self.train_dataset)}, Val: {len(self.val_dataset)}")
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
@@ -574,6 +675,7 @@ class SqueezeAndExcitation(nn.Module):
             nn.Linear(in_features=self.squeeze_dimension, out_features=channels),
             nn.Sigmoid()
         )
+
     def forward(self, features_tensor: torch.Tensor) -> torch.Tensor:
         """
         Computes channel-wise attention weights and scales input features.
@@ -615,6 +717,7 @@ class AudioFilterPredictorModule(LightningModule):
         num_filter_classes: int,
         num_categories: int,
         num_subtypes: int,
+        spectrogram_type: str = 'erb',
         learning_rate: float = DEFAULT_LEARNING_RATE,
         optimizer_type: str = DEFAULT_OPTIMIZER_TYPE,
         class_weights: torch.Tensor = None,
@@ -637,12 +740,17 @@ class AudioFilterPredictorModule(LightningModule):
         self.ema_decay: float = 0.95  # Standard decay rate; balances responsiveness vs stability
         print(f"[INFO] ema_decay = {self.ema_decay}")
 
-        # Shared feature extractor (4 input channels: real_L, imag_L, real_R, imag_R)
-        # with SE blocks inserted after conv blocks 1 & 2
+        if spectrogram_type == 'erb':
+            spectrogram_channels = 2
+        else:
+            spectrogram_channels = 4
+        # Shared feature extractor (4 input channels: real_L, imag_L, real_R, imag_R) if using full complex spectrograms
+        # Otherwise, if spectrogram_type == 'erb': 2 input channels: (mag L/R ERB)
+        # Either way: SE blocks inserted after conv blocks 1 & 2
         # SE forces the network to focus on discriminative frequency bands early, reducing gradient noise from irrelevant bins.
         self.shared_encoder: nn.Sequential = nn.Sequential(
             # Block 1: Low-level spectral pattern extraction
-            nn.Conv2d(in_channels=4, out_channels=32, kernel_size=5, stride=1, padding=1),
+            nn.Conv2d(in_channels=spectrogram_channels, out_channels=32, kernel_size=5, stride=1, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             SqueezeAndExcitation(channels=32, reduction_ratio=8),  # Recalibrate low-level features
@@ -708,8 +816,8 @@ class AudioFilterPredictorModule(LightningModule):
     @staticmethod
     def _compute_normalized_combined_loss(
         freq_loss: torch.Tensor,
-        cls_loss: torch.Tensor,
         freq_ema: torch.Tensor,
+        cls_loss: torch.Tensor,
         cls_ema: torch.Tensor,
     ) -> torch.Tensor:
         """
@@ -781,13 +889,15 @@ class AudioFilterPredictorModule(LightningModule):
             target=batch["variant_label"],
         )
 
+        cls_loss: torch.Tensor = (HIERARCHY_CAT_WEIGHT * cat_loss) + (HIERARCHY_SUB_WEIGHT * sub_loss) + (HIERARCHY_VAR_WEIGHT * var_loss)
         # Multi-task loss weighting (frequency usually has larger gradient magnitudes)
-        total_loss: torch.Tensor = freq_loss + (HIERARCHY_CAT_WEIGHT * cat_loss) + (HIERARCHY_SUB_WEIGHT * sub_loss) + (HIERARCHY_VAR_WEIGHT * var_loss)
+        total_loss: torch.Tensor = freq_loss + cls_loss
 
         self.log("train_freq_loss", freq_loss, prog_bar=True, logger=True)
         self.log("train_cat_loss", cat_loss, prog_bar=True, logger=True)
         self.log("train_sub_loss", sub_loss, prog_bar=True, logger=True)
         self.log("train_var_loss", var_loss, prog_bar=True, logger=True)
+        self.log("train_cls_loss", cls_loss, prog_bar=True, logger=True)
         self.log("train_total_loss", total_loss, prog_bar=True, logger=True)
 
         return total_loss
@@ -814,6 +924,8 @@ class AudioFilterPredictorModule(LightningModule):
             target=batch["variant_label"],
         )
 
+        cls_loss: torch.Tensor = (HIERARCHY_CAT_WEIGHT * cat_loss) + (HIERARCHY_SUB_WEIGHT * sub_loss) + (HIERARCHY_VAR_WEIGHT * var_loss)
+
         # Update EMA buffers with detached values to prevent gradient bleeding into validation graph
         self.freq_loss_ema.copy_(self.ema_decay * self.freq_loss_ema + (1 - self.ema_decay) * freq_loss.detach())
         self.cls_loss_ema.copy_(self.ema_decay * self.cls_loss_ema + (1 - self.ema_decay) * cls_loss.detach())
@@ -821,8 +933,8 @@ class AudioFilterPredictorModule(LightningModule):
         # Compute scale-invariant combined metric for monitoring & checkpointing
         val_total_loss: torch.Tensor = self._compute_normalized_combined_loss(
             freq_loss=freq_loss,
-            cls_loss=var_loss,
             freq_ema=self.freq_loss_ema,
+            cls_loss=cls_loss,
             cls_ema=self.cls_loss_ema,
         )
 
@@ -838,6 +950,7 @@ class AudioFilterPredictorModule(LightningModule):
         self.log("val_cat_loss", cat_loss, prog_bar=True, logger=True)
         self.log("val_sub_loss", sub_loss, prog_bar=True, logger=True)
         self.log("val_var_loss", var_loss, prog_bar=True, logger=True)
+        self.log("val_cls_loss", cls_loss, prog_bar=True, logger=True)
         self.log("val_total_loss", val_total_loss, prog_bar=True, logger=True)
 
         self.log("val_cat_accuracy", cat_acc, prog_bar=True, logger=True)
@@ -1036,27 +1149,30 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
     num_subtypes: int = data_module.train_dataset.dataset.num_subtypes
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    checkpoint_filename = f"{timestamp}_" + "{epoch:04d}_{val_accuracy:.4g}_{val_total_loss:.4g}_{val_cls_loss:.4g}_{val_freq_loss:.4g}"
+    checkpoint_filename = f"{timestamp}_" + "{epoch:04d}_{val_total_loss:.4g}_{val_freq_loss:.4g}_{val_cls_loss:.4g}_{val_var_accuracy:.4g}"
     checkpoint_callback = ModelCheckpoint(
         dirpath=Path(cli_arguments.output_dir) / "checkpoints",
         filename=checkpoint_filename,
-        monitor="val_accuracy",#"val_total_loss",
-        mode="max",#"min",
+        monitor="val_total_loss",
+        mode="min",
         save_top_k=5,
-        #save_last=True,
+        save_last=True,
         verbose=True,
     )
 
     # Write JSON sidecar
     metadata_path = Path(cli_arguments.output_dir) / "checkpoints" / f"{timestamp}_filter_metadata.json"
     print(f"[DEBUG] metadata_path = {metadata_path}")
+    #print(f"[DEBUG] mid_level_index_map = {pprint(dict(data_module.train_dataset.dataset.mid_level_index_map))}")
+    #print(f"[DEBUG] index_to_filter_type = {pprint(dict(data_module.train_dataset.dataset.index_to_filter_type))}")
+    #print(f"[DEBUG] class_counts = {pprint(dict(data_module.train_dataset.dataset.class_counts))}")
     metadata_content: Dict[str, Any] = {
         "num_categories": num_categories,
         "num_subtypes": num_subtypes,
         "num_variants": int(data_module.train_dataset.dataset.num_variants),
         "filter_hierarchy_mapping": {k: list(v) for k, v in data_module.train_dataset.dataset.filter_hierarchy_mapping.items()},
-        "mid_level_index_map": dict(data_module.train_dataset.dataset.mid_level_index_map),
-        "index_to_filter_type": data_module.train_dataset.dataset.index_to_filter_type,
+        #"mid_level_index_map": dict(data_module.train_dataset.dataset.mid_level_index_map),
+        "index_to_filter_type": dict(data_module.train_dataset.dataset.index_to_filter_type),
         "num_classes": num_classes,
         "class_counts": dict(data_module.train_dataset.dataset.class_counts),
         #"category_index_to_name": data_module.train_dataset.dataset.category_index_to_name,
@@ -1080,7 +1196,7 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
         callbacks=[checkpoint_callback, rich_model_summary, device_stats_monitor, time_stats_monitor, EMAWeightAveraging(), RichProgressBar()],
         logger=tensorboard_logger,
         log_every_n_steps=10,
-        precision="bf16-mixed",  # Mixed precision for speed, which is probably not significantly worse than "32-true" speed.
+        precision="16-mixed",  # Mixed precision for speed, which is probably not significantly worse than "32-true" speed.
         gradient_clip_val=1.0, # Prevents gradient explosion OOMs during early training instability
         accumulate_grad_batches=DEFAULT_ACCUMULATE_GRAD_BATCHES,
         profiler="simple",
@@ -1109,8 +1225,8 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
     # Using dynamic calculation prevents profile mismatches and ensures benchmark accuracy
     dummy_spectrogram_input = torch.randn(
         cli_arguments.batch_size,
-        4,                    # left and right audio channels * real and imaginary parts of STFT
-        STFT_N_FFT // 2 + 1,  # Frequency bins: n_fft/2 + 1 for real-valued STFT
+        2,#4,                    # left and right audio channels * real and imaginary parts of STFT
+        128,#STFT_N_FFT // 2 + 1,  # Frequency bins: n_fft/2 + 1 for real-valued STFT
         expected_time_frames  # Time frames: dynamically computed from duration & hop
     )
     dummy_batch = [{"spectrogram_input": dummy_spectrogram_input}]
@@ -1129,6 +1245,8 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
     print(f"[INFO] Optimizer: AdamW | Scheduler: CosineAnnealingWarmRestarts")
     print(f"[INFO] Perceptual loss weighting: ERB-scale dynamic gradient scaling")
     print(f"[INFO] Hierarchy Loss Weights: Cat={HIERARCHY_CAT_WEIGHT}, Sub={HIERARCHY_SUB_WEIGHT}, Var={HIERARCHY_VAR_WEIGHT}")
+    print(f"[DEBUG] torch.cuda.memory_summary():")
+    print(torch.cuda.memory_summary())
 
     trainer.fit(model=model_instance, datamodule=data_module)
 
