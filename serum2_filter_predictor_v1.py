@@ -202,8 +202,8 @@ class AudioFilterPredictionDataset(Dataset):
             num_filters=self.erband_count,
             sample_rate=self.sample_rate,
             n_fft=self.n_fft,
-            low_frequency_hz=20.0,
-            high_frequency_hz=24000.0  # Covers full synth range; bins above this are discarded
+            low_frequency_hz=8.0,
+            high_frequency_hz=22050.0  # Covers full synth range; bins above this are discarded
         ).transpose(0, 1)
 
         # Normal = [
@@ -379,6 +379,7 @@ class AudioFilterPredictionDataset(Dataset):
             stft_real_left, stft_imag_left = self._compute_stft_channels(sliced_audio_tensor[0, :])
             stft_real_right, stft_imag_right = self._compute_stft_channels(sliced_audio_tensor[1, :])
             #print(f"[DEBUG] Size of stft_real_left = {stft_real_left.nbytes}. Size of stft_imag_left = {stft_imag_left.nbytes}.")
+            del audio_data_array
             del audio_tensor
             del sliced_audio_tensor
 
@@ -390,10 +391,7 @@ class AudioFilterPredictionDataset(Dataset):
                 erband_spectrogram: torch.Tensor = torch.matmul(
                     self.erb_filterbank_matrix,  # [128, 1025]
                     torch.stack([magnitude_left, magnitude_right], dim=0)  # [2 channels, 1025 freq_bins, T]
-                    ) # [n_erb_bins, channels, time_frames] -> [128, 2, T]
-                # Reshape to [time_frames, erband_count, channels] -> [channels, erband_count, time_frames]
-                # Transpose to match CNN input convention: [channels, erband_bins, time_frames] -> [2, 128, T]
-                #erband_spectrogram: torch.Tensor = erband_tensor.permute(1, 0, 2)
+                ) # [2 channels, 128 erb_bins, T time_frames] -> [2, 128, T]
                 #print(f"[DEBUG] erband_spectrogram.shape = {erband_spectrogram.shape}")
             else:
                 # Convert to complex log-spectrogram
@@ -422,6 +420,11 @@ class AudioFilterPredictionDataset(Dataset):
                 # STFT precision loss is negligible for CNN inputs:
                 #   16-bit mantissa covers ±5.0 range with ~0.03 LSB resolution, far below filter class boundaries).
                 # This cuts memory to ~3.0 MB/sample (-50% versus ~6 MB at float32) with zero accuracy degradation.
+
+            del stft_real_left
+            del stft_imag_left
+            del stft_real_right
+            del stft_imag_right
 
             # Document(json_path).as_obj is how yyjson.Document returns a Dict from a .JSON file
             # This is equivalent to `json.load()` but at least 10x faster
@@ -505,9 +508,6 @@ class AudioFilterPredictionDataset(Dataset):
         log_frequency_target: float = self.cached_frequency_targets[idx]
         filter_1_type: str = self.cached_filter_1_types[idx]
         filter_1_freq_hz: float = self.cached_filter_1_freqs_hz[idx]
-
-        # Map categorical label to integer index
-        label_index: int = self.filter_type_to_index[filter_1_type]
 
         # Store filter type and hierarchy metadata alongside Tensors.
         hierarchy_tuple = self.filter_hierarchy_mapping[filter_1_type]
@@ -750,13 +750,19 @@ class AudioFilterPredictorModule(LightningModule):
         # SE forces the network to focus on discriminative frequency bands early, reducing gradient noise from irrelevant bins.
         self.shared_encoder: nn.Sequential = nn.Sequential(
             # Block 1: Low-level spectral pattern extraction
-            nn.Conv2d(in_channels=spectrogram_channels, out_channels=32, kernel_size=5, stride=1, padding=1),
+            nn.Conv2d(in_channels=spectrogram_channels, out_channels=16, kernel_size=5, stride=1, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+            SqueezeAndExcitation(channels=16, reduction_ratio=8),  # Recalibrate low-level features
+            nn.MaxPool2d(kernel_size=2, stride=2),  # Halves time & freq resolution
+            # Block 1.5
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=1, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
-            SqueezeAndExcitation(channels=32, reduction_ratio=8),  # Recalibrate low-level features
+            SqueezeAndExcitation(channels=32, reduction_ratio=8),  # Recalibrate low-mid-level features
             nn.MaxPool2d(kernel_size=2, stride=2),  # Halves time & freq resolution
             # Block 2: Mid-level architecture pattern extraction
-            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=1, padding=1),
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             SqueezeAndExcitation(channels=64, reduction_ratio=8),  # Recalibrate mid-level features
@@ -777,7 +783,9 @@ class AudioFilterPredictorModule(LightningModule):
             nn.ReLU(inplace=True),
             nn.Linear(in_features=64, out_features=32),
             nn.ReLU(inplace=True),
-            nn.Linear(in_features=32, out_features=1),  # Predicts log-frequency
+            nn.Linear(in_features=32, out_features=16),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_features=16, out_features=1),  # Predicts log-frequency
         )
 
         # Hierarchical Classification Heads
@@ -973,14 +981,14 @@ class AudioFilterPredictorModule(LightningModule):
             betas=(0.9, 0.995),
             #foreach=True,
             # https://discuss.pytorch.org/t/nan-loss-issues-with-precision-16-in-pytorch-lightning-gan-training/204369/7
-            eps=1e-6,
+            #eps=1e-6,
         )
 
         scheduler: torch.optim.lr_scheduler._LRScheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer=optimizer,
-            T_0=10,  # Restart after 10 epochs
+            T_0=16,  # Restart after 10 epochs
             T_mult=2,  # Double restart interval each cycle
-            eta_min=1e-6,  # Minimum learning rate floor
+            eta_min=1e-7,  # Minimum learning rate floor
         )
 
         return {
@@ -1153,7 +1161,7 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
     checkpoint_callback = ModelCheckpoint(
         dirpath=Path(cli_arguments.output_dir) / "checkpoints",
         filename=checkpoint_filename,
-        monitor="val_total_loss",
+        monitor="val_freq_loss",
         mode="min",
         save_top_k=5,
         save_last=True,
@@ -1196,7 +1204,7 @@ def run_training_mode(cli_arguments: argparse.Namespace) -> None:
         callbacks=[checkpoint_callback, rich_model_summary, device_stats_monitor, time_stats_monitor, EMAWeightAveraging(), RichProgressBar()],
         logger=tensorboard_logger,
         log_every_n_steps=10,
-        precision="16-mixed",  # Mixed precision for speed, which is probably not significantly worse than "32-true" speed.
+        precision="32-true",  # Mixed precision for speed, which is probably not significantly worse than "32-true" speed.
         gradient_clip_val=1.0, # Prevents gradient explosion OOMs during early training instability
         accumulate_grad_batches=DEFAULT_ACCUMULATE_GRAD_BATCHES,
         profiler="simple",
