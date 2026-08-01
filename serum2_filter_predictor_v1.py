@@ -54,6 +54,7 @@ from torch.utils.data import DataLoader, Dataset
 from pprint import pprint
 # Useful for benchmarking, and less verbose than print() statements in loops
 from tqdm import tqdm
+from transformers import Wav2Vec2Processor, Wav2Vec2Model, AutoTokenizer
 # Faster than stock `json`, makes a big difference when loading data from 300_000+ .JSON files at once
 from yyjson import Document
 
@@ -105,6 +106,12 @@ CLASS_WEIGHT_NORMALIZATION_METHOD: str = "sum_to_one"  # Options: 'sum_to_one', 
 HIERARCHY_CAT_WEIGHT: float = 0.2
 HIERARCHY_SUB_WEIGHT: float = 0.3
 HIERARCHY_VAR_WEIGHT: float = 0.5
+
+# TEXT_TOKENIZER_DEFAULTS: We use a lightweight character-level tokenizer
+# instead of a full word-piece model to reduce VRAM overhead and avoid
+# dependency on external vocabularies during inference.
+TEXT_MAX_LENGTH: int = 64
+TEXT_VOCAB_SIZE: int = 256  # ASCII printable range
 
 
 # =============================================================================
@@ -438,6 +445,13 @@ class AudioFilterPredictionDataset(Dataset):
             # This compresses the dynamic range and aligns with human perceptual spacing
             log_frequency_target: float = math.log1p(filter_1_freq_hz)
 
+            # Simple character-level text encoding. Trade-off: loses semantic structure
+            # compared to word-piece tokenization, but drastically reduces VRAM and
+            # inference complexity while still providing meaningful conditioning signals.
+            text_token_ids = torch.zeros(TEXT_MAX_LENGTH, dtype=torch.long)
+            for char_idx, char in enumerate(filter_1_type[:TEXT_MAX_LENGTH]):
+                text_token_ids[char_idx] = ord(char) % TEXT_VOCAB_SIZE
+
             # Cache all pre-encoded features
             if spectrogram_type == 'erb':
                 self.cached_spectrograms.append(erband_spectrogram)
@@ -447,6 +461,7 @@ class AudioFilterPredictionDataset(Dataset):
             self.cached_frequency_targets.append(log_frequency_target)
             self.cached_filter_1_types.append(filter_1_type)
             self.cached_filter_1_freqs_hz.append(filter_1_freq_hz)
+            self.cached_text_token_ids.append(text_token_ids)
 
         print(f"[DEBUG] Size of quantized_spectrogram = {self.cached_spectrograms[-1].nbytes}.")
         print("\n" + "="*20 + " BEFORE gc.collect() and torch.cuda.empty_cache() " + "="*20)
@@ -508,6 +523,7 @@ class AudioFilterPredictionDataset(Dataset):
         log_frequency_target: float = self.cached_frequency_targets[idx]
         filter_1_type: str = self.cached_filter_1_types[idx]
         filter_1_freq_hz: float = self.cached_filter_1_freqs_hz[idx]
+        text_token_ids: torch.Tensor = self.cached_text_token_ids[idx]
 
         # Store filter type and hierarchy metadata alongside Tensors.
         hierarchy_tuple = self.filter_hierarchy_mapping[filter_1_type]
@@ -523,6 +539,7 @@ class AudioFilterPredictionDataset(Dataset):
             "category_label": torch.tensor(category_index, dtype=torch.long),
             "subtype_label": torch.tensor(subtype_index, dtype=torch.long),
             "variant_label": torch.tensor(variant_index, dtype=torch.long),
+            "text_token_ids": text_token_ids,
         }
 
 
@@ -866,6 +883,32 @@ class AudioFilterPredictorModule(LightningModule):
         predicted_category_logits: torch.Tensor = self.category_classification_head(flattened_latent)
         predicted_subtype_logits: torch.Tensor = self.subtype_classification_head(flattened_latent)
         predicted_variant_logits: torch.Tensor = self.variant_classification_head(flattened_latent)
+
+        """
+        Forward pass. Text is optional to support inference where only audio is provided.
+        """
+        # Audio encoding: wav2vec2 expects [batch, sequence_length]
+        with torch.no_grad() if not self.training else nullcontext():
+            audio_encoder_outputs = self.audio_encoder(audio_waveform)
+
+        # Extract last hidden state and average pool across time steps to get
+        # a fixed-size audio representation per sample. Trade-off: loses temporal
+        # ordering but matches the dimensionality required for fusion.
+        audio_contextual_features = audio_encoder_outputs.last_hidden_state.mean(dim=1)  # [batch, 768]
+
+        if text_token_ids is not None:
+            # Text encoding: embed -> conv1d -> pool
+            embedded_text = self.text_embedding_layer(text_token_ids)  # [batch, seq_len, 128]
+            pooled_text_features = self.text_conv_projector(embedded_text.transpose(1, 2)).squeeze(-1)  # [batch, 256]
+
+            # Concatenate modalities before classification head
+            combined_representation = torch.cat([audio_contextual_features, pooled_text_features], dim=1)
+        else:
+            # Inference path: use audio features directly
+            combined_representation = audio_contextual_features
+
+        classification_logits = self.fusion_mlp(combined_representation)
+        return classification_logits
 
         return {
             "predicted_log_frequency": predicted_log_frequency,
